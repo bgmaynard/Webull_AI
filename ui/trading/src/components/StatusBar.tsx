@@ -11,6 +11,12 @@ const PHASE_COLORS: Record<string, string> = {
   SHADOW: '#5bc0de',
 };
 
+const MODE_COLORS: Record<string, string> = {
+  SIMULATION: '#f0ad4e',
+  PAPER: '#5bc0de',
+  LIVE: '#5cb85c',
+};
+
 export function StatusBar() {
   const { data } = usePolling<Status>(api.status, 2000);
   const { connected } = useWebSocket();
@@ -18,12 +24,21 @@ export function StatusBar() {
   if (!data) return <div className="status-bar">Loading...</div>;
 
   const phaseColor = PHASE_COLORS[data.trading_phase] || '#666';
+  const modeColor = MODE_COLORS[data.mode] || '#5cb85c';
 
   return (
     <div className="status-bar">
       <div className="status-item">
         <span className="label">Server</span>
         <span className="value">{data.version}</span>
+      </div>
+      <div className="status-item">
+        <span className="label">Broker</span>
+        <span className="value">{data.broker_provider?.toUpperCase() || '?'}</span>
+      </div>
+      <div className="status-item">
+        <span className="label">Data</span>
+        <span className="value">{data.market_data_provider?.toUpperCase() || '?'}</span>
       </div>
       <div className="status-item">
         <span className="label">Time (ET)</span>
@@ -36,14 +51,16 @@ export function StatusBar() {
         </span>
       </div>
       <div className="status-item">
+        <span className="label">Mode</span>
+        <span className="value" style={{ color: modeColor, fontWeight: 'bold' }}>
+          {data.mode}
+        </span>
+      </div>
+      <div className="status-item">
         <span className="label">Auth</span>
         <span className="value" style={{ color: data.authenticated ? '#5cb85c' : '#d9534f' }}>
           {data.authenticated ? 'OK' : 'NO'}
         </span>
-      </div>
-      <div className="status-item">
-        <span className="label">Account</span>
-        <span className="value">{data.account_type}</span>
       </div>
       <div className="status-item">
         <span className="label">WS</span>

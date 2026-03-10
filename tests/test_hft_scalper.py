@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 from ai.hft_scalper import HFTScalper, OpenTrade
-from webull_market_data import Quote
+from core.models import Quote
 
 
 @pytest.fixture

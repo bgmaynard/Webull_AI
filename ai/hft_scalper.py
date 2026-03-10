@@ -21,8 +21,9 @@ import pytz
 
 from ai.central_gating import get_gating
 from ai.momentum_engine import MomentumState, get_momentum_engine
-from webull_broker import OrderSide, OrderType, get_broker
-from webull_market_data import Quote, get_market_data
+from core.models import OrderSide, OrderType, Quote
+from core.registry import get_broker, get_market_data
+from worklist.store import get_worklist_store
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,9 @@ class HFTScalper:
                     # Check cooldowns
                     momentum.check_cooldowns()
 
+                    # Feed worklist scores into momentum engine
+                    await self._update_momentum_scores(momentum)
+
                     # Monitor open positions
                     await self._monitor_positions()
 
@@ -222,6 +226,67 @@ class HFTScalper:
                     await asyncio.sleep(1.0)
         finally:
             logger.info("Scalper loop exited")
+
+    # --- Momentum Score Feeding ---
+
+    async def _update_momentum_scores(self, momentum):
+        """Feed live scores into momentum engine to drive FSM transitions.
+
+        Refreshes quotes and computes real-time scores from current market data,
+        rather than relying on potentially stale worklist scores.
+        """
+        from worklist.scoring import ScoringInput, score as compute_score
+
+        store = get_worklist_store()
+        md = get_market_data()
+
+        for entry in store.to_list():
+            symbol = entry["symbol"]
+
+            # Skip symbols already in position or exiting
+            sm = momentum.get_symbol(symbol)
+            if sm.state in (MomentumState.IN_POSITION, MomentumState.MONITORING,
+                            MomentumState.EXITING, MomentumState.COOLDOWN):
+                continue
+
+            # Refresh quote for live data
+            try:
+                quote = await md.get_quote(symbol)
+            except Exception:
+                continue
+
+            if not quote or quote.price <= 0:
+                continue
+
+            # Build real-time scoring input from current quote
+            gap_pct = max(quote.change_pct, 0)
+            volume = quote.volume
+
+            # Estimate RVOL from volume trajectory (sim stocks accumulate volume over time)
+            # Use a reasonable estimate: high-gap stocks typically have 5-15x RVOL
+            rvol = max(1.0, gap_pct / 10) if gap_pct > 0 else 1.0
+
+            scoring_input = ScoringInput(
+                symbol=symbol,
+                gap_pct=gap_pct,
+                volume=volume,
+                rvol=rvol,
+                news_score=0.0,
+                scanner_score=50.0,
+                last_data_time=time.time(),  # Fresh data = no time decay
+            )
+
+            live_score = compute_score(scoring_input)
+
+            # Also update the worklist entry score
+            wl_entry = store.get(symbol)
+            if wl_entry:
+                wl_entry.score = live_score
+                wl_entry.scoring_input = scoring_input
+                wl_entry.last_scored_at = time.time()
+
+            # Feed into momentum engine (drives IDLE->CANDIDATE->IGNITING->GATED)
+            momentum.update_score(symbol, live_score)
 
     # --- Position Monitoring (Exit Logic) ---
 

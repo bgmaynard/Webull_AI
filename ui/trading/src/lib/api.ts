@@ -25,6 +25,9 @@ function del<T>(url: string): Promise<T> {
 export interface Status {
   server: string;
   version: string;
+  mode: string;
+  broker_provider: string;
+  market_data_provider: string;
   authenticated: boolean;
   account_type: string;
   time_et: string;

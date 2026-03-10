@@ -54,6 +54,7 @@ class CentralGating:
     def __init__(self):
         self.kill_switch: bool = False
         self.account_type: str = "paper"
+        self.sim_mode: bool = False  # Bypasses trading phase check
         self.blacklist: set[str] = set()
         self.session_trade_count: int = 0
         self.session_trade_cap: int = 50
@@ -96,13 +97,16 @@ class CentralGating:
             return GateResult(approved=False, checks_passed=passed, checks_failed=failed, reason="Kill switch active")
         passed.append("kill_switch")
 
-        # 2. Trading phase
-        now = datetime.now(ET)
-        phase = self._get_phase(now)
-        if phase != "LIVE":
-            failed.append("trading_phase")
-            return GateResult(approved=False, checks_passed=passed, checks_failed=failed, reason=f"Trading phase is {phase}, not LIVE")
-        passed.append("trading_phase")
+        # 2. Trading phase (bypassed in sim mode)
+        if self.sim_mode:
+            passed.append("trading_phase")
+        else:
+            now = datetime.now(ET)
+            phase = self._get_phase(now)
+            if phase != "LIVE":
+                failed.append("trading_phase")
+                return GateResult(approved=False, checks_passed=passed, checks_failed=failed, reason=f"Trading phase is {phase}, not LIVE")
+            passed.append("trading_phase")
 
         # 3. Symbol not halted (placeholder — Webull doesn't expose halt status directly)
         passed.append("halt_check")

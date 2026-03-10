@@ -36,11 +36,19 @@ VALID_TRANSITIONS: dict[MomentumState, list[MomentumState]] = {
     MomentumState.COOLDOWN: [MomentumState.IDLE],
 }
 
-# Grid-searched momentum thresholds
+# Momentum thresholds — tuned for partial data coverage
+# (no real news feed or precise RVOL yet, so max realistic score ~40-50)
 MOMENTUM_THRESHOLDS = {
-    "candidate_score": 30,   # Min score to become CANDIDATE
-    "igniting_score": 45,    # Min score to start IGNITING
-    "gated_score": 60,       # Min score to pass through gate
+    "candidate_score": 15,   # Min score to become CANDIDATE
+    "igniting_score": 22,    # Min score to start IGNITING
+    "gated_score": 28,       # Min score to pass through gate
+}
+
+# Sim-mode thresholds (same for now, can diverge later)
+SIM_MOMENTUM_THRESHOLDS = {
+    "candidate_score": 15,
+    "igniting_score": 22,
+    "gated_score": 28,
 }
 
 
@@ -79,10 +87,11 @@ class SymbolMomentum:
 class MomentumEngine:
     """Manages momentum FSMs for all tracked symbols."""
 
-    def __init__(self):
+    def __init__(self, sim_mode: bool = False):
         self._symbols: dict[str, SymbolMomentum] = {}
         self._event_listeners: list[Callable[[MomentumEvent], None]] = []
         self._cooldown_seconds: float = 60.0
+        self._thresholds = SIM_MOMENTUM_THRESHOLDS if sim_mode else MOMENTUM_THRESHOLDS
 
     def on_event(self, listener: Callable[[MomentumEvent], None]):
         """Register an event listener for state transitions."""
@@ -146,19 +155,21 @@ class MomentumEngine:
         sm.last_update = time.time()
 
         # Auto-transitions based on score thresholds
-        if sm.state == MomentumState.IDLE and score >= MOMENTUM_THRESHOLDS["candidate_score"]:
-            self.transition(symbol, MomentumState.CANDIDATE, f"score={score:.1f} >= {MOMENTUM_THRESHOLDS['candidate_score']}")
+        thresholds = self._thresholds
+
+        if sm.state == MomentumState.IDLE and score >= thresholds["candidate_score"]:
+            self.transition(symbol, MomentumState.CANDIDATE, f"score={score:.1f} >= {thresholds['candidate_score']}")
 
         elif sm.state == MomentumState.CANDIDATE:
-            if score >= MOMENTUM_THRESHOLDS["igniting_score"]:
-                self.transition(symbol, MomentumState.IGNITING, f"score={score:.1f} >= {MOMENTUM_THRESHOLDS['igniting_score']}")
-            elif score < MOMENTUM_THRESHOLDS["candidate_score"]:
+            if score >= thresholds["igniting_score"]:
+                self.transition(symbol, MomentumState.IGNITING, f"score={score:.1f} >= {thresholds['igniting_score']}")
+            elif score < thresholds["candidate_score"]:
                 self.transition(symbol, MomentumState.IDLE, f"score={score:.1f} dropped below threshold")
 
         elif sm.state == MomentumState.IGNITING:
-            if score >= MOMENTUM_THRESHOLDS["gated_score"]:
-                self.transition(symbol, MomentumState.GATED, f"score={score:.1f} >= {MOMENTUM_THRESHOLDS['gated_score']}")
-            elif score < MOMENTUM_THRESHOLDS["candidate_score"]:
+            if score >= thresholds["gated_score"]:
+                self.transition(symbol, MomentumState.GATED, f"score={score:.1f} >= {thresholds['gated_score']}")
+            elif score < thresholds["candidate_score"]:
                 self.transition(symbol, MomentumState.IDLE, f"score={score:.1f} momentum faded")
 
     def mark_position_entered(self, symbol: str, entry_price: float, qty: int):
@@ -214,8 +225,8 @@ class MomentumEngine:
 _instance: MomentumEngine | None = None
 
 
-def get_momentum_engine() -> MomentumEngine:
+def get_momentum_engine(sim_mode: bool = False) -> MomentumEngine:
     global _instance
     if _instance is None:
-        _instance = MomentumEngine()
+        _instance = MomentumEngine(sim_mode=sim_mode)
     return _instance

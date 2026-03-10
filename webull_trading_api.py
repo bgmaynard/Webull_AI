@@ -1,5 +1,6 @@
-"""Webull Trading Bot — Main FastAPI server.
+"""Trading Bot — Main FastAPI server.
 
+Broker-agnostic. Reads BROKER_PROVIDER and MARKET_DATA_PROVIDER from env.
 Single server handling REST + WebSocket on port 9100.
 """
 
@@ -17,9 +18,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from webull_auth import get_auth
-from webull_broker import get_broker
-from webull_market_data import get_market_data
+load_dotenv()
+
+from core.registry import get_broker, get_market_data, get_provider_name, is_sim_mode, wire_sim_market_data
 from ai.hft_scalper import get_scalper
 from ai.central_gating import get_gating
 from ai.momentum_engine import MomentumState, get_momentum_engine
@@ -30,15 +31,13 @@ from ai.event_system import get_event_system
 from ai.reports import get_reports
 from ai.watchdog import get_watchdog
 
-load_dotenv()
-
 # --- Logging (ASCII-only for Windows) ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger("webull_bot")
+logger = logging.getLogger("trading_bot")
 
 ET = pytz.timezone("US/Eastern")
 
@@ -77,14 +76,28 @@ ws_manager = ConnectionManager()
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Webull Trading Bot starting...")
+    provider = get_provider_name()
+    logger.info("Trading Bot starting... (broker=%s)", provider)
 
-    # Login to Webull
-    auth = get_auth()
-    if auth.login():
-        logger.info("Webull authentication successful (mode=%s)", auth.account_type)
-    else:
-        logger.warning("Webull authentication failed - bot will run with limited functionality")
+    if is_sim_mode():
+        logger.info("Running in SIMULATION mode -- mock broker + market data active")
+        get_gating().sim_mode = True
+        get_momentum_engine(sim_mode=True)
+        # Wire mock market data to mock broker
+        wire_sim_market_data(get_broker(), get_market_data())
+
+    elif provider == "webull":
+        from webull_auth import get_auth
+        auth = get_auth()
+        if auth.login():
+            logger.info("Webull authentication successful (mode=%s)", auth.account_type)
+        else:
+            logger.warning("Webull authentication failed - bot will run with limited functionality")
+
+    elif provider == "alpaca":
+        # Alpaca uses API key auth -- no login step needed
+        acct = await get_broker().get_account()
+        logger.info("Alpaca connected (account=%s, equity=$%.2f)", acct.account_id[:8], acct.net_liquidation)
 
     # Start watchdog
     watchdog = get_watchdog()
@@ -95,13 +108,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     await watchdog.stop()
     await get_event_system().flush()
-    logger.info("Webull Trading Bot shutting down...")
+    logger.info("Trading Bot shutting down...")
 
 
 # --- App ---
 app = FastAPI(
-    title="Webull Trading Bot",
-    version="0.1.0",
+    title="Trading Bot",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -116,6 +129,66 @@ app.add_middleware(RateLimitMiddleware, requests_per_second=20, burst=50)
 app.add_middleware(BackpressureMiddleware, max_concurrent=100)
 
 
+# --- Auth (Webull-specific, gated) ---
+@app.get("/api/auth/status")
+async def auth_status():
+    if get_provider_name() != "webull":
+        return {"provider": get_provider_name(), "message": "No auth required for this broker"}
+    from webull_auth import get_auth
+    auth = get_auth()
+    return auth.get_login_status()
+
+
+@app.post("/api/auth/login")
+async def auth_login():
+    if get_provider_name() != "webull":
+        return {"success": True, "message": "No login required for this broker"}
+    from webull_auth import get_auth
+    auth = get_auth()
+    success = await asyncio.to_thread(auth.login)
+    return {"success": success, "status": auth.get_login_status()}
+
+
+@app.post("/api/auth/mfa/request")
+async def auth_mfa_request():
+    if get_provider_name() != "webull":
+        return {"sent": False, "message": "MFA not applicable for this broker"}
+    from webull_auth import get_auth
+    auth = get_auth()
+    sent = await asyncio.to_thread(auth.request_mfa)
+    return {"sent": sent, "message": "Check your email/phone for the MFA code" if sent else "Failed to request MFA"}
+
+
+@app.post("/api/auth/mfa/submit")
+async def auth_mfa_submit(code: str):
+    if get_provider_name() != "webull":
+        return {"success": False, "message": "MFA not applicable for this broker"}
+    from webull_auth import get_auth
+    auth = get_auth()
+    success = await asyncio.to_thread(auth.login_with_mfa, code)
+    return {"success": success, "status": auth.get_login_status()}
+
+
+@app.post("/api/auth/refresh")
+async def auth_refresh():
+    if get_provider_name() != "webull":
+        return {"success": True, "message": "No token refresh needed for this broker"}
+    from webull_auth import get_auth
+    auth = get_auth()
+    success = await asyncio.to_thread(auth.refresh_token)
+    return {"success": success}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    if get_provider_name() != "webull":
+        return {"logged_out": True}
+    from webull_auth import get_auth
+    auth = get_auth()
+    auth.clear_token()
+    return {"logged_out": True}
+
+
 # --- Health & Status ---
 @app.get("/api/health")
 async def health():
@@ -124,16 +197,60 @@ async def health():
 
 @app.get("/api/status")
 async def status():
-    auth = get_auth()
     now = datetime.now(ET)
-    return {
-        "server": "webull_trading_bot",
-        "version": "0.1.0",
-        "authenticated": auth.is_logged_in,
-        "account_type": auth.account_type,
+    provider = get_provider_name()
+
+    base = {
+        "server": "trading_bot",
+        "version": "0.2.0",
+        "broker_provider": provider,
+        "market_data_provider": os.getenv("MARKET_DATA_PROVIDER", "sim").lower(),
         "time_et": now.strftime("%H:%M:%S"),
         "trading_phase": _get_trading_phase(now),
     }
+
+    if provider == "sim":
+        base.update({
+            "mode": "SIMULATION",
+            "authenticated": True,
+            "account_type": "simulation",
+        })
+    elif provider == "alpaca":
+        base.update({
+            "mode": "LIVE" if os.getenv("ALPACA_PAPER", "true").lower() != "true" else "PAPER",
+            "authenticated": True,
+            "account_type": "paper" if os.getenv("ALPACA_PAPER", "true").lower() == "true" else "live",
+        })
+    elif provider == "webull":
+        from webull_auth import get_auth
+        auth = get_auth()
+        base.update({
+            "mode": "LIVE",
+            "authenticated": auth.is_logged_in,
+            "account_type": auth.account_type,
+        })
+
+    return base
+
+
+@app.get("/api/sim/universe")
+async def sim_universe():
+    if not is_sim_mode():
+        return {"error": "Not in simulation mode"}
+    md = get_market_data()
+    if hasattr(md, "get_universe"):
+        return {"stocks": md.get_universe()}
+    return {"stocks": []}
+
+
+@app.get("/api/sim/stats")
+async def sim_stats():
+    if not is_sim_mode():
+        return {"error": "Not in simulation mode"}
+    broker = get_broker()
+    if hasattr(broker, "get_sim_stats"):
+        return broker.get_sim_stats()
+    return {}
 
 
 # --- Account & Positions ---
@@ -197,12 +314,40 @@ async def worklist():
 
 @app.post("/api/worklist/add/{symbol}")
 async def worklist_add(symbol: str):
-    pipeline = get_pipeline()
-    success = await pipeline.process_single(symbol.upper())
+    from worklist.scoring import ScoringInput
+    import time as _time
+
+    symbol = symbol.upper()
     store = get_worklist_store()
+
+    # Manual add: get quote for scoring, skip scrutiny filters
+    md = get_market_data()
+    quote = await md.get_quote(symbol)
+
+    gap_pct = quote.change_pct if quote and quote.change_pct > 0 else 0
+    volume = quote.volume if quote else 0
+
+    # Manual adds get boosted scores — user intent overrides scanner thresholds.
+    # If market data is unavailable (after hours), use reasonable defaults.
+    rvol = max(3.0, gap_pct / 10) if gap_pct > 0 else 3.0
+    # Base scanner + news score to compensate for missing data sources
+    scanner_score = max(70.0, min(100.0, gap_pct + 50)) if gap_pct > 0 else 70.0
+    news_score = 50.0  # Assume moderate news for manual adds
+
+    scoring_input = ScoringInput(
+        symbol=symbol,
+        gap_pct=gap_pct,
+        volume=volume,
+        rvol=rvol,
+        scanner_score=scanner_score,
+        news_score=news_score,
+        last_data_time=_time.time(),
+    )
+
+    success = store.add(symbol, scoring_input, source="manual")
     if success:
-        return {"added": True, "symbol": symbol.upper(), "worklist": store.to_list()}
-    return {"added": False, "symbol": symbol.upper(), "message": "Symbol did not pass scrutiny filters"}
+        return {"added": True, "symbol": symbol, "worklist": store.to_list()}
+    return {"added": False, "symbol": symbol, "message": "Could not add -- score too low to displace existing symbols"}
 
 
 @app.delete("/api/worklist/remove/{symbol}")
@@ -379,7 +524,6 @@ async def websocket_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
         while True:
-            # Keep connection alive, listen for client messages
             data = await ws.receive_text()
             try:
                 msg = json.loads(data)

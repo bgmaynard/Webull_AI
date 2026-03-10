@@ -8,7 +8,8 @@ import asyncio
 import logging
 import time
 
-from webull_market_data import Quote, get_market_data
+from core.models import Quote
+from core.registry import get_market_data
 from worklist.scoring import ScoringInput, score
 from worklist.scrutiny import ScrutinyConfig, SymbolData, evaluate, get_scrutiny_config
 from worklist.store import get_worklist_store
@@ -161,9 +162,10 @@ class WorklistPipeline:
         )
 
     async def process_single(self, symbol: str, quote: Quote | None = None) -> bool:
-        """Process a single symbol through the pipeline (for force-add).
+        """Process a single symbol for manual/force-add.
 
-        Force-add uses the full pipeline — no score bypass.
+        Manual adds skip scrutiny filters (user intent overrides scanner
+        thresholds) but still score through the normal scoring pipeline.
         """
         md = get_market_data()
         if not quote:
@@ -174,24 +176,6 @@ class WorklistPipeline:
             return False
 
         gap_pct = quote.change_pct if quote.change_pct > 0 else 0
-        dollar_volume = quote.price * quote.volume
-
-        sym_data = SymbolData(
-            symbol=symbol,
-            price=quote.price,
-            volume=quote.volume,
-            rvol=1.0,  # Unknown for manual add
-            spread_pct=quote.spread_pct,
-            gap_pct=gap_pct,
-            float_millions=0,  # Unknown
-            dollar_volume=dollar_volume,
-            scanner_score=50.0,
-        )
-
-        result = evaluate(sym_data)
-        if not result.passed:
-            logger.info("Force-add %s failed scrutiny: %s", symbol, result.reason)
-            return False
 
         scoring_input = ScoringInput(
             symbol=symbol,

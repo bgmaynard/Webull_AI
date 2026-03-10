@@ -1,5 +1,6 @@
 """Basic tests for the trading API server."""
 
+import os
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -7,17 +8,13 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def client():
-    """Create test client with mocked Webull auth."""
-    with patch("webull_trading_api.get_auth") as mock_auth:
-        mock_instance = MagicMock()
-        mock_instance.login.return_value = True
-        mock_instance.is_logged_in = True
-        mock_instance.account_type = "paper"
-        mock_auth.return_value = mock_instance
+    """Create test client using sim mode (no auth needed)."""
+    os.environ["BROKER_PROVIDER"] = "sim"
+    os.environ["MARKET_DATA_PROVIDER"] = "sim"
 
-        from webull_trading_api import app
-        with TestClient(app) as c:
-            yield c
+    from webull_trading_api import app
+    with TestClient(app) as c:
+        yield c
 
 
 def test_health(client):
@@ -32,7 +29,7 @@ def test_status(client):
     resp = client.get("/api/status")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["server"] == "webull_trading_bot"
+    assert data["server"] == "trading_bot"
     assert data["trading_phase"] in [
         "OFFHOURS", "DISCOVERY", "LIVE", "EXIT_ONLY", "SHADOW"
     ]
