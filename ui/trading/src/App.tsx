@@ -4,6 +4,7 @@ import { ScalperControls } from './components/ScalperControls';
 import { WatchlistPanel } from './components/WatchlistPanel';
 import { WorklistPanel } from './components/WorklistPanel';
 import { TradesPanel } from './components/TradesPanel';
+import { TradeHistory } from './components/TradeHistory';
 import { QuotePanel } from './components/QuotePanel';
 import { EODReport } from './components/EODReport';
 import './App.css';
@@ -19,6 +20,7 @@ function App() {
         <div className="col">
           <ScalperControls />
           <TradesPanel />
+          <TradeHistory />
           <PositionsPanel />
         </div>
         <div className="col">

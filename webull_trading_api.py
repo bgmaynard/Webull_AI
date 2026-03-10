@@ -99,6 +99,19 @@ async def lifespan(app: FastAPI):
         acct = await get_broker().get_account()
         logger.info("Alpaca connected (account=%s, equity=$%.2f)", acct.account_id[:8], acct.net_liquidation)
 
+        # Set gating account_type for paper trading (expanded trading window)
+        if os.getenv("ALPACA_PAPER", "true").lower() == "true":
+            get_gating().account_type = "paper"
+            logger.info("Gating account_type set to 'paper' (expanded trading window)")
+
+    # Auto-start the worklist/scanner pipeline
+    try:
+        pipeline = get_pipeline()
+        await pipeline.start()
+        logger.info("Scanner pipeline auto-started")
+    except Exception as e:
+        logger.warning("Failed to auto-start scanner pipeline: %s", e)
+
     # Start watchdog
     watchdog = get_watchdog()
     await watchdog.start()
@@ -315,6 +328,7 @@ async def worklist():
 @app.post("/api/worklist/add/{symbol}")
 async def worklist_add(symbol: str):
     from worklist.scoring import ScoringInput
+    from data.finnhub import get_finnhub_news
     import time as _time
 
     symbol = symbol.upper()
@@ -332,7 +346,14 @@ async def worklist_add(symbol: str):
     rvol = max(3.0, gap_pct / 10) if gap_pct > 0 else 3.0
     # Base scanner + news score to compensate for missing data sources
     scanner_score = max(70.0, min(100.0, gap_pct + 50)) if gap_pct > 0 else 70.0
-    news_score = 50.0  # Assume moderate news for manual adds
+    # Fetch live news score from Finnhub (falls back to 50 on failure)
+    try:
+        news_score = await get_finnhub_news().get_news_score(symbol)
+        if news_score == 0.0:
+            news_score = 50.0  # Default if no articles found
+    except Exception:
+        logger.warning("Finnhub news fetch failed for %s, using default", symbol)
+        news_score = 50.0
 
     scoring_input = ScoringInput(
         symbol=symbol,
@@ -429,6 +450,15 @@ async def scalper_config_get():
 async def scalper_config_update(updates: dict):
     scalper = get_scalper()
     return scalper.update_config(updates)
+
+
+@app.get("/api/scalper/history")
+async def scalper_history():
+    scalper = get_scalper()
+    return {
+        "trades": scalper.get_trade_history(),
+        "summary": scalper.get_session_pnl(),
+    }
 
 
 @app.get("/api/scalper/trades")

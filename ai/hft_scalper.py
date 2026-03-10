@@ -74,6 +74,7 @@ class HFTScalper:
         self.enabled: bool = False  # Never persisted
         self.running: bool = False
         self.open_trades: dict[str, OpenTrade] = {}
+        self._completed_trades: list[dict] = []
         self._loop_task: asyncio.Task | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_alive: bool = False
@@ -234,11 +235,14 @@ class HFTScalper:
 
         Refreshes quotes and computes real-time scores from current market data,
         rather than relying on potentially stale worklist scores.
+        Fetches Finnhub news scores for each symbol (cached 5min).
         """
         from worklist.scoring import ScoringInput, score as compute_score
+        from data.finnhub import get_finnhub_news
 
         store = get_worklist_store()
         md = get_market_data()
+        finnhub = get_finnhub_news()
 
         for entry in store.to_list():
             symbol = entry["symbol"]
@@ -266,12 +270,18 @@ class HFTScalper:
             # Use a reasonable estimate: high-gap stocks typically have 5-15x RVOL
             rvol = max(1.0, gap_pct / 10) if gap_pct > 0 else 1.0
 
+            # Fetch news score from Finnhub (cached, non-blocking on failure)
+            try:
+                news_score = await finnhub.get_news_score(symbol)
+            except Exception:
+                news_score = 0.0
+
             scoring_input = ScoringInput(
                 symbol=symbol,
                 gap_pct=gap_pct,
                 volume=volume,
                 rvol=rvol,
-                news_score=0.0,
+                news_score=news_score,
                 scanner_score=50.0,
                 last_data_time=time.time(),  # Fresh data = no time decay
             )
@@ -458,8 +468,22 @@ class HFTScalper:
         if result.success:
             trade.exit_order_id = result.order_id
             pnl = trade.pnl(sell_price)
+            pnl_pct = trade.pnl_pct(sell_price)
             logger.info("EXIT: %s %d shares @ %.2f | PnL: $%.2f | Reason: %s",
                         symbol, trade.qty, sell_price, pnl, reason)
+
+            # Record completed trade
+            self._completed_trades.append({
+                "symbol": symbol,
+                "entry_price": trade.entry_price,
+                "exit_price": sell_price,
+                "qty": trade.qty,
+                "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "hold_seconds": round(trade.hold_seconds, 1),
+                "exit_reason": reason,
+                "timestamp": datetime.now(ET).isoformat(),
+            })
         else:
             logger.warning("Exit order FAILED for %s: %s — will retry", symbol, result.message)
             return
@@ -528,6 +552,36 @@ class HFTScalper:
             "session_trades": get_gating().session_trade_count,
             "kill_switch": get_gating().kill_switch,
             "config": self.config,
+        }
+
+    def get_trade_history(self) -> list[dict]:
+        """Return all completed trades for this session."""
+        return list(self._completed_trades)
+
+    def get_session_pnl(self) -> dict:
+        """Return session P&L summary."""
+        trades = self._completed_trades
+        total_trades = len(trades)
+        if total_trades == 0:
+            return {
+                "total_trades": 0,
+                "winners": 0,
+                "losers": 0,
+                "win_rate": 0.0,
+                "total_pnl": 0.0,
+            }
+
+        winners = sum(1 for t in trades if t["pnl"] > 0)
+        losers = sum(1 for t in trades if t["pnl"] <= 0)
+        total_pnl = sum(t["pnl"] for t in trades)
+        win_rate = (winners / total_trades) * 100 if total_trades > 0 else 0.0
+
+        return {
+            "total_trades": total_trades,
+            "winners": winners,
+            "losers": losers,
+            "win_rate": round(win_rate, 1),
+            "total_pnl": round(total_pnl, 2),
         }
 
     def get_trades(self) -> list[dict]:

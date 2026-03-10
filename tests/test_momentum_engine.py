@@ -45,38 +45,38 @@ def test_full_lifecycle():
 
 def test_score_auto_transitions():
     engine = MomentumEngine()
-    # Below candidate threshold — stays IDLE
-    engine.update_score("AAPL", 20)
+    # Below candidate threshold (15) — stays IDLE
+    engine.update_score("AAPL", 10)
     assert engine.get_symbol("AAPL").state == MomentumState.IDLE
 
     # At candidate threshold — moves to CANDIDATE
-    engine.update_score("AAPL", 30)
+    engine.update_score("AAPL", 15)
     assert engine.get_symbol("AAPL").state == MomentumState.CANDIDATE
 
-    # At igniting threshold — moves to IGNITING
-    engine.update_score("AAPL", 45)
+    # At igniting threshold (22) — moves to IGNITING
+    engine.update_score("AAPL", 22)
     assert engine.get_symbol("AAPL").state == MomentumState.IGNITING
 
-    # At gated threshold — moves to GATED
-    engine.update_score("AAPL", 60)
+    # At gated threshold (28) — moves to GATED
+    engine.update_score("AAPL", 28)
     assert engine.get_symbol("AAPL").state == MomentumState.GATED
 
 
 def test_score_decay_resets_to_idle():
     engine = MomentumEngine()
-    engine.update_score("AAPL", 35)
+    engine.update_score("AAPL", 16)
     assert engine.get_symbol("AAPL").state == MomentumState.CANDIDATE
 
-    # Score drops below threshold
+    # Score drops below threshold (15)
     engine.update_score("AAPL", 10)
     assert engine.get_symbol("AAPL").state == MomentumState.IDLE
 
 
 def test_get_all_active():
     engine = MomentumEngine()
-    engine.update_score("AAPL", 35)  # CANDIDATE
+    engine.update_score("AAPL", 16)  # CANDIDATE
     engine.update_score("MSFT", 10)  # stays IDLE
-    engine.update_score("TSLA", 50)  # IGNITING
+    engine.update_score("TSLA", 23)  # IGNITING
 
     active = engine.get_all_active()
     symbols = {sm.symbol for sm in active}

@@ -103,7 +103,14 @@ class CentralGating:
         else:
             now = datetime.now(ET)
             phase = self._get_phase(now)
-            if phase != "LIVE":
+            if self.account_type == "paper":
+                # Paper/sim: allow trading during all market-active phases (4AM-4PM ET)
+                paper_allowed = {"DISCOVERY", "LIVE", "EXIT_ONLY", "SHADOW"}
+                if phase not in paper_allowed:
+                    failed.append("trading_phase")
+                    return GateResult(approved=False, checks_passed=passed, checks_failed=failed,
+                                      reason=f"Trading phase is {phase}, paper mode allows {paper_allowed}")
+            elif phase != "LIVE":
                 failed.append("trading_phase")
                 return GateResult(approved=False, checks_passed=passed, checks_failed=failed, reason=f"Trading phase is {phase}, not LIVE")
             passed.append("trading_phase")

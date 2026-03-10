@@ -117,6 +117,31 @@ export interface EODReport {
   message?: string;
 }
 
+export interface CompletedTrade {
+  symbol: string;
+  entry_price: number;
+  exit_price: number;
+  qty: number;
+  pnl: number;
+  pnl_pct: number;
+  hold_seconds: number;
+  exit_reason: string;
+  timestamp: string;
+}
+
+export interface SessionPnlSummary {
+  total_trades: number;
+  winners: number;
+  losers: number;
+  win_rate: number;
+  total_pnl: number;
+}
+
+export interface TradeHistoryResponse {
+  trades: CompletedTrade[];
+  summary: SessionPnlSummary;
+}
+
 export interface WatchdogStatus {
   running: boolean;
   last_heartbeat_age: number;
@@ -143,6 +168,7 @@ export const api = {
   scalperEnable: () => post<{ enabled: boolean }>('/api/scalper/enable'),
   scalperDisable: () => post<{ enabled: boolean }>('/api/scalper/disable'),
   scalperTrades: () => fetchJson<{ trades: Trade[]; count: number }>('/api/scalper/trades'),
+  scalperHistory: () => fetchJson<TradeHistoryResponse>('/api/scalper/history'),
   scalperWatchlist: () => fetchJson<{ symbols: WatchlistEntry[]; count: number }>('/api/scalper/watchlist'),
   scalperConfig: () => fetchJson<Record<string, unknown>>('/api/scalper/config'),
   scalperUpdateConfig: (updates: Record<string, unknown>) => post<Record<string, unknown>>('/api/scalper/config', updates),

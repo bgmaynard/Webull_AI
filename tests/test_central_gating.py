@@ -35,9 +35,24 @@ def test_kill_switch_blocks():
 
 def test_wrong_phase_blocks():
     g = _make_gating("DISCOVERY")
+    g.account_type = "live"  # Live mode blocks non-LIVE phases
     result = g.evaluate("AAPL", 0.5, 0, 5.0)
     assert not result.approved
     assert "DISCOVERY" in result.reason
+
+
+def test_paper_mode_allows_discovery():
+    g = _make_gating("DISCOVERY")
+    g.account_type = "paper"
+    result = g.evaluate("AAPL", 0.5, 0, 5.0)
+    assert result.approved
+
+
+def test_paper_mode_blocks_offhours():
+    g = _make_gating("OFFHOURS")
+    g.account_type = "paper"
+    result = g.evaluate("AAPL", 0.5, 0, 5.0)
+    assert not result.approved
 
 
 def test_blacklist_blocks():
