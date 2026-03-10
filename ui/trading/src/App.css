@@ -1,0 +1,295 @@
+/* Webull Trading Bot Dashboard */
+
+:root {
+  --bg: #1a1a2e;
+  --bg-panel: #16213e;
+  --bg-input: #0f3460;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --border: #2a2a4a;
+  --accent: #5bc0de;
+  --profit: #5cb85c;
+  --loss: #d9534f;
+  --warning: #f0ad4e;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.app {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 8px;
+}
+
+header {
+  text-align: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+header h1 {
+  font-size: 18px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Status Bar */
+.status-bar {
+  display: flex;
+  gap: 16px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.status-item {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Dashboard Grid */
+.dashboard {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+@media (max-width: 1200px) {
+  .dashboard { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 768px) {
+  .dashboard { grid-template-columns: 1fr; }
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Panels */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.panel h3 {
+  font-size: 13px;
+  color: var(--accent);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.empty {
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+th {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+tr:hover td {
+  background: rgba(255,255,255,0.03);
+}
+
+.symbol {
+  font-weight: bold;
+  color: var(--accent);
+}
+
+.profit { color: var(--profit); }
+.loss { color: var(--loss); }
+
+/* Controls */
+.controls-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-row .label {
+  width: 110px;
+  color: var(--text-dim);
+}
+
+.value-on { color: var(--profit); font-weight: bold; }
+.value-off { color: var(--loss); font-weight: bold; }
+
+/* Labels & Values */
+.label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.value {
+  color: var(--text);
+}
+
+/* Buttons */
+button {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent);
+  color: #000;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  border-color: var(--loss);
+  color: var(--loss);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--loss);
+  color: #fff;
+}
+
+.btn-small {
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+/* Inputs */
+input[type="text"] {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  flex: 1;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.add-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+/* Quote Grid */
+.quote-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  padding: 6px 0;
+}
+
+.quote-grid > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Report Grid */
+.report-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+
+.report-grid > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.exit-reasons {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tag {
+  display: inline-block;
+  background: var(--bg-input);
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-right: 4px;
+  font-size: 11px;
+}
+
+.error {
+  color: var(--loss);
+  padding: 4px 0;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}

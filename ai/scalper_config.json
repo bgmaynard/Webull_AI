@@ -1,0 +1,20 @@
+{
+  "account_size": 750.0,
+  "risk_percent": 2.0,
+  "profit_target_percent": 2.5,
+  "stop_loss_percent": 1.5,
+  "trailing_stop_percent": 1.0,
+  "max_hold_seconds": 300,
+  "max_spread_percent": 1.0,
+  "min_price": 2.0,
+  "max_price": 20.0,
+  "max_watchlist_size": 15,
+  "watchlist_rerank_interval_seconds": 300,
+  "use_symbol_circuit_breaker": true,
+  "hard_stop_limit_per_symbol": 3,
+  "circuit_breaker_cooldown_minutes": 30,
+  "lean_mode": true,
+  "session_trade_cap": 50,
+  "max_position_count": 3,
+  "max_risk_dollars_per_trade": 10.0
+}

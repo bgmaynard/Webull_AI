@@ -1,5 +1,7 @@
 # Environment variables / secrets
 .env
+.env.txt
+tokens/
 
 # Python
 __pycache__/
@@ -13,6 +15,10 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Node
+node_modules/
+ui/trading/dist/
 
 # OS
 .DS_Store
