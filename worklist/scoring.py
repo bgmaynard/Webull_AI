@@ -86,6 +86,49 @@ def score(inp: ScoringInput, config: ScoringConfig | None = None) -> float:
     return round(min(100, max(0, raw_score)), 1)
 
 
+def score_with_breakdown(inp: ScoringInput, config: ScoringConfig | None = None) -> tuple[float, dict]:
+    """Calculate composite score AND return individual normalized components.
+
+    Returns (total_score, breakdown_dict) where breakdown_dict contains
+    each component's normalized 0-100 value before weighting.
+    """
+    cfg = config or _config
+
+    # Normalize each component to 0-100
+    gap_norm = round(min(inp.gap_pct / inp.gap_cap, 1.0) * 100, 1)
+    vol_norm = round(min(inp.volume / inp.volume_cap, 1.0) * 100, 1)
+    rvol_norm = round(min(inp.rvol / inp.rvol_cap, 1.0) * 100, 1)
+    news_norm = round(min(max(inp.news_score, 0), 100), 1)
+    scanner_norm = round(min(max(inp.scanner_score, 0), 100), 1)
+
+    # Weighted composite
+    raw_score = (
+        cfg.weight_gap * gap_norm
+        + cfg.weight_volume * vol_norm
+        + cfg.weight_rvol * rvol_norm
+        + cfg.weight_news * news_norm
+        + cfg.weight_scanner_score * scanner_norm
+    )
+
+    # Time decay
+    if inp.last_data_time > 0:
+        age_seconds = time.time() - inp.last_data_time
+        if age_seconds > cfg.stale_threshold_seconds:
+            stale_minutes = (age_seconds - cfg.stale_threshold_seconds) / 60
+            decay = stale_minutes * cfg.decay_per_minute
+            raw_score = max(0, raw_score - decay)
+
+    total = round(min(100, max(0, raw_score)), 1)
+    breakdown = {
+        "gap": gap_norm,
+        "volume": vol_norm,
+        "rvol": rvol_norm,
+        "news": news_norm,
+        "scanner": scanner_norm,
+    }
+    return total, breakdown
+
+
 def score_batch(inputs: list[ScoringInput], config: ScoringConfig | None = None) -> list[tuple[str, float]]:
     """Score multiple symbols and return sorted (symbol, score) pairs."""
     results = [(inp.symbol, score(inp, config)) for inp in inputs]

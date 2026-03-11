@@ -16,6 +16,7 @@ import pytz
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
@@ -403,6 +404,119 @@ async def worklist_pipeline_stop():
     pipeline = get_pipeline()
     await pipeline.stop()
     return {"running": False}
+
+
+class BulkAddRequest(BaseModel):
+    symbols: list[str]
+
+
+@app.get("/api/worklist/enriched")
+async def worklist_enriched():
+    """Return worklist symbols enriched with live market data, momentum state, and news."""
+    from worklist.scoring import ScoringInput, score_with_breakdown
+    from data.finnhub import get_finnhub_news
+
+    store = get_worklist_store()
+    md = get_market_data()
+    momentum = get_momentum_engine()
+    finnhub = get_finnhub_news()
+
+    entries = store.get_all()
+    enriched = []
+
+    for entry in entries:
+        base = entry.to_dict()
+
+        # Market data (non-blocking cached quote)
+        quote = md.get_cached_quote(entry.symbol)
+        if quote:
+            base["price"] = quote.price
+            base["change_pct"] = round(quote.change_pct, 2)
+            base["bid"] = quote.bid
+            base["ask"] = quote.ask
+            base["spread_pct"] = round(quote.spread_pct, 2)
+            base["volume"] = quote.volume
+        else:
+            base["price"] = None
+            base["change_pct"] = None
+            base["bid"] = None
+            base["ask"] = None
+            base["spread_pct"] = None
+            base["volume"] = None
+
+        # Momentum FSM state
+        sm = momentum.get_symbol(entry.symbol)
+        base["momentum_state"] = sm.state.value
+        base["momentum_score"] = round(sm.score, 1)
+
+        # News data (cached internally by Finnhub)
+        try:
+            news_score = await finnhub.get_news_score(entry.symbol)
+            articles = await finnhub.get_news(entry.symbol)
+            base["news_score"] = round(news_score, 1)
+            base["news_count"] = len(articles)
+        except Exception:
+            base["news_score"] = None
+            base["news_count"] = 0
+
+        # Score breakdown from scoring engine
+        if entry.scoring_input:
+            _, breakdown = score_with_breakdown(entry.scoring_input)
+            base["score_breakdown"] = breakdown
+        else:
+            base["score_breakdown"] = None
+
+        enriched.append(base)
+
+    return {"symbols": enriched, "count": len(enriched), "max_size": store.max_size}
+
+
+@app.post("/api/worklist/add-bulk")
+async def worklist_add_bulk(req: BulkAddRequest):
+    """Add multiple symbols to the worklist at once."""
+    from worklist.scoring import ScoringInput
+    from data.finnhub import get_finnhub_news
+    import time as _time
+
+    store = get_worklist_store()
+    md = get_market_data()
+    results = []
+
+    for raw_symbol in req.symbols:
+        symbol = raw_symbol.upper()
+        try:
+            quote = await md.get_quote(symbol)
+            gap_pct = quote.change_pct if quote and quote.change_pct > 0 else 0
+            volume = quote.volume if quote else 0
+
+            rvol = max(3.0, gap_pct / 10) if gap_pct > 0 else 3.0
+            scanner_score = max(70.0, min(100.0, gap_pct + 50)) if gap_pct > 0 else 70.0
+
+            try:
+                news_score = await get_finnhub_news().get_news_score(symbol)
+                if news_score == 0.0:
+                    news_score = 50.0
+            except Exception:
+                news_score = 50.0
+
+            scoring_input = ScoringInput(
+                symbol=symbol,
+                gap_pct=gap_pct,
+                volume=volume,
+                rvol=rvol,
+                scanner_score=scanner_score,
+                news_score=news_score,
+                last_data_time=_time.time(),
+            )
+
+            added = store.add(symbol, scoring_input, source="manual_bulk")
+            results.append({"symbol": symbol, "added": added})
+
+        except Exception as e:
+            logger.warning("Bulk add failed for %s: %s", symbol, e)
+            results.append({"symbol": symbol, "added": False, "error": str(e)})
+
+    return {"results": results, "count": store.count}
 
 
 # --- Scalper ---

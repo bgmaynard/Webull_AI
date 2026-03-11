@@ -87,6 +87,34 @@ export interface WatchlistEntry {
   time_in_state: number;
 }
 
+export interface ScoreBreakdown {
+  gap: number;
+  volume: number;
+  rvol: number;
+  news: number;
+  scanner: number;
+}
+
+export interface BulkAddResult {
+  symbol: string;
+  added: boolean;
+  error?: string;
+}
+
+export interface EnrichedWorklistEntry extends WorklistEntry {
+  price: number | null;
+  change_pct: number | null;
+  bid: number | null;
+  ask: number | null;
+  spread_pct: number | null;
+  volume: number | null;
+  momentum_state: string;
+  momentum_score: number;
+  news_score: number | null;
+  news_count: number;
+  score_breakdown: ScoreBreakdown | null;
+}
+
 export interface QuoteData {
   symbol: string;
   price: number;
@@ -159,7 +187,9 @@ export const api = {
   price: (symbol: string) => fetchJson<QuoteData>(`/api/price/${symbol}`),
 
   worklist: () => fetchJson<{ symbols: WorklistEntry[]; count: number; max_size: number }>('/api/worklist'),
+  worklistEnriched: () => fetchJson<{ symbols: EnrichedWorklistEntry[]; count: number; max_size: number }>('/api/worklist/enriched'),
   worklistAdd: (symbol: string) => post<{ added: boolean }>(`/api/worklist/add/${symbol}`),
+  worklistAddBulk: (symbols: string[]) => post<{ results: BulkAddResult[]; count: number }>('/api/worklist/add-bulk', { symbols }),
   worklistRemove: (symbol: string) => del<{ removed: boolean }>(`/api/worklist/remove/${symbol}`),
 
   scalperStatus: () => fetchJson<ScalperStatus>('/api/scalper/status'),
