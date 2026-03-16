@@ -117,12 +117,42 @@ async def lifespan(app: FastAPI):
     watchdog = get_watchdog()
     await watchdog.start()
 
+    # Auto-enable and start the scalper
+    try:
+        scalper = get_scalper()
+        scalper.enable()
+        await scalper.start()
+        logger.info("Scalper auto-enabled and started")
+    except Exception as e:
+        logger.warning("Failed to auto-start scalper: %s", e)
+
     yield
 
-    # Shutdown
-    await watchdog.stop()
-    await get_event_system().flush()
+    # Shutdown — Mar 12: proper cleanup sequence
     logger.info("Trading Bot shutting down...")
+
+    # 1. Stop watchdog first (stop monitoring)
+    await watchdog.stop()
+
+    # 2. Stop scalper (persists positions to disk)
+    try:
+        scalper = get_scalper()
+        if scalper.running:
+            await scalper.stop()
+            logger.info("Scalper stopped, positions persisted")
+    except Exception as e:
+        logger.error("Error stopping scalper: %s", e)
+
+    # 3. Stop scanner pipeline
+    try:
+        pipeline = get_pipeline()
+        await pipeline.stop()
+    except Exception as e:
+        logger.error("Error stopping pipeline: %s", e)
+
+    # 4. Flush all remaining events to disk
+    await get_event_system().flush()
+    logger.info("Shutdown complete")
 
 
 # --- App ---
@@ -307,15 +337,18 @@ async def account():
 async def price(symbol: str):
     md = get_market_data()
     quote = await md.get_quote(symbol.upper())
+    # Real spread only when bid/ask differ meaningfully (not synthetic)
+    has_real_spread = quote.bid > 0 and quote.ask > 0 and abs(quote.ask - quote.bid) > 0.001
     return {
         "symbol": quote.symbol,
         "price": quote.price,
         "bid": quote.bid,
         "ask": quote.ask,
-        "spread": round(quote.spread, 4),
-        "spread_pct": round(quote.spread_pct, 2),
-        "volume": quote.volume,
+        "spread": round(quote.spread, 4) if has_real_spread else None,
+        "spread_pct": round(quote.spread_pct, 2) if has_real_spread else None,
+        "volume": quote.volume if quote.volume > 0 else None,
         "change_pct": round(quote.change_pct, 2),
+        "prev_close": quote.prev_close,
     }
 
 
@@ -424,12 +457,16 @@ async def worklist_enriched():
     entries = store.get_all()
     enriched = []
 
+    # Fetch fresh quotes for all worklist symbols in one batch call
+    symbols = [e.symbol for e in entries]
+    quotes = await md.get_quotes_batch(symbols) if symbols else {}
+
     for entry in entries:
         base = entry.to_dict()
 
-        # Market data (non-blocking cached quote)
-        quote = md.get_cached_quote(entry.symbol)
-        if quote:
+        # Market data from batch fetch
+        quote = quotes.get(entry.symbol)
+        if quote and quote.price > 0:
             base["price"] = quote.price
             base["change_pct"] = round(quote.change_pct, 2)
             base["bid"] = quote.bid
@@ -566,6 +603,16 @@ async def scalper_config_update(updates: dict):
     return scalper.update_config(updates)
 
 
+@app.post("/api/scalper/reset-session")
+async def scalper_reset_session():
+    """Reset session counters and trade history for new trading day."""
+    scalper = get_scalper()
+    scalper._completed_trades.clear()
+    get_gating().reset_session()
+    logger.info("Session reset: trade history cleared, gating counters reset")
+    return {"success": True, "session_trades": 0}
+
+
 @app.get("/api/scalper/history")
 async def scalper_history():
     scalper = get_scalper()
@@ -618,11 +665,108 @@ async def circuit_breakers():
     return gating.get_circuit_breaker_status()
 
 
+# --- Optimizer ---
+
+@app.post("/api/optimizer/run")
+async def optimizer_run(population: int = 50, generations: int = 100,
+                        use_bars: bool = True, date: str | None = None,
+                        trade_file: str | None = None):
+    from ai.optimizer import get_optimizer
+    opt = get_optimizer()
+    if opt.running:
+        return {"error": "Optimizer already running", "progress": opt.progress}
+    # Run in background task
+    opt._task = asyncio.create_task(opt.run(
+        trade_file=trade_file, date=date,
+        population_size=population, generations=generations, use_bars=use_bars,
+    ))
+    return {"started": True, "population": population, "generations": generations,
+            "date": date or "today"}
+
+
+@app.get("/api/optimizer/status")
+async def optimizer_status():
+    from ai.optimizer import get_optimizer
+    opt = get_optimizer()
+    return {"running": opt.running, "progress": opt.progress}
+
+
+@app.get("/api/optimizer/results")
+async def optimizer_results():
+    from ai.optimizer import get_optimizer
+    opt = get_optimizer()
+    if opt.latest_result:
+        return opt.latest_result
+    return {"error": "No optimization results available. Run POST /api/optimizer/run first."}
+
+
+@app.post("/api/optimizer/apply")
+async def optimizer_apply():
+    from ai.optimizer import get_optimizer
+    opt = get_optimizer()
+    applied = opt.apply_best()
+    if applied:
+        return {"applied": True, "config": applied}
+    return {"applied": False, "error": "No results to apply"}
+
+
 # --- Reports ---
+
+def _build_report_from_trades(trades: list[dict]) -> dict:
+    """Build an EOD-style report from in-memory trade history."""
+    from collections import defaultdict
+    from datetime import datetime
+    import pytz
+
+    date_str = datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d")
+    winners = [t for t in trades if t.get("pnl", 0) > 0]
+    losers = [t for t in trades if t.get("pnl", 0) <= 0]
+    total_pnl = sum(t.get("pnl", 0) for t in trades)
+    gross_profit = sum(t["pnl"] for t in winners)
+    gross_loss = abs(sum(t["pnl"] for t in losers))
+    win_rate = (len(winners) / len(trades) * 100) if trades else 0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else ("inf" if gross_profit > 0 else 0)
+    avg_hold = (sum(t.get("hold_seconds", 0) for t in trades) / len(trades)) if trades else 0
+
+    exit_reasons = defaultdict(int)
+    for t in trades:
+        reason = t.get("exit_reason", "unknown").split("(")[0].strip()
+        exit_reasons[reason] += 1
+
+    symbols = list(set(t.get("symbol", "") for t in trades))
+
+    return {
+        "date": date_str,
+        "total_trades": len(trades),
+        "winners": len(winners),
+        "losers": len(losers),
+        "win_rate": round(win_rate, 1),
+        "total_pnl": round(total_pnl, 2),
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "profit_factor": round(profit_factor, 2) if isinstance(profit_factor, float) else profit_factor,
+        "avg_hold_seconds": round(avg_hold, 1),
+        "exit_reasons": dict(exit_reasons),
+        "symbols_traded": symbols,
+        "blocked_trades": 0,
+        "shadow_trades": 0,
+        "total_events": len(trades),
+    }
+
+
 @app.get("/api/reports/eod/today")
 async def eod_report_today():
     reports = get_reports()
-    return await reports.generate_eod()
+    report = await reports.generate_eod()
+
+    # Fallback: build from in-memory trade history if event ledger is empty
+    if report.get("total_trades", 0) == 0:
+        scalper = get_scalper()
+        trades = scalper.get_trade_history()
+        if trades:
+            report = _build_report_from_trades(trades)
+
+    return report
 
 
 @app.get("/api/reports/eod/{date}")

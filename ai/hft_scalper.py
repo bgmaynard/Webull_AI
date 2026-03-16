@@ -20,7 +20,9 @@ from pathlib import Path
 import pytz
 
 from ai.central_gating import get_gating
+from ai.event_system import Event, EventType, get_event_system
 from ai.momentum_engine import MomentumState, get_momentum_engine
+from ai.persistence import get_position_store
 from core.models import OrderSide, OrderType, Quote
 from core.registry import get_broker, get_market_data
 from worklist.store import get_worklist_store
@@ -75,10 +77,13 @@ class HFTScalper:
         self.running: bool = False
         self.open_trades: dict[str, OpenTrade] = {}
         self._completed_trades: list[dict] = []
+        self._session_date: str = ""  # tracks current trading day for auto-reset
+        self._symbol_loss_cooldown: dict[str, float] = {}  # symbol -> cooldown_until timestamp
+        self._pending_exits: dict[str, str] = {}  # symbol -> exit_order_id (Mar 12: fill confirmation)
         self._loop_task: asyncio.Task | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_alive: bool = False
-        self._liquidation_lock = threading.Lock()
+        self._liquidation_lock = asyncio.Lock()  # Mar 12: was threading.Lock, blocks event loop
         self._load_config()
 
         # Wire up gating
@@ -136,6 +141,7 @@ class HFTScalper:
             "session_trade_cap": 50,
             "max_position_count": 3,
             "max_risk_dollars_per_trade": 10.0,
+            "symbol_loss_cooldown_seconds": 600,
         }
 
     def update_config(self, updates: dict) -> dict:
@@ -151,7 +157,7 @@ class HFTScalper:
     # --- Lifecycle ---
 
     async def start(self) -> bool:
-        """Start the scalper loop."""
+        """Start the scalper loop. Restores persisted positions from disk."""
         if self.running:
             logger.warning("Scalper already running")
             return False
@@ -159,14 +165,32 @@ class HFTScalper:
             logger.warning("Cannot start: scalper not enabled")
             return False
 
+        # Auto-reset session on new trading day
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        if self._session_date and today != self._session_date:
+            logger.info("New trading day (%s -> %s): clearing session", self._session_date, today)
+            self._completed_trades.clear()
+            self._symbol_loss_cooldown.clear()
+            get_gating().reset_session()
+        self._session_date = today
+
+        # Restore positions from disk (survive restarts)
+        await self._restore_positions()
+
+        # Reconcile with broker — only needed for real brokers (alpaca/webull)
+        from core.registry import is_sim_mode
+        if not is_sim_mode():
+            await self._reconcile_broker_positions()
+
         self.running = True
         self._start_heartbeat()
         self._loop_task = asyncio.create_task(self._scalper_loop())
+        get_event_system().emit_system_event(EventType.SCALPER_STARTED)
         logger.info("Scalper STARTED")
         return True
 
     async def stop(self) -> bool:
-        """Stop the scalper loop. Existing positions remain open."""
+        """Stop the scalper loop. Persists open positions to disk."""
         if not self.running:
             return False
         self.running = False
@@ -174,7 +198,11 @@ class HFTScalper:
             self._loop_task.cancel()
             self._loop_task = None
         self._stop_heartbeat()
-        logger.info("Scalper STOPPED")
+        # Persist positions so they survive restart
+        await self._persist_positions()
+        get_event_system().emit_system_event(EventType.SCALPER_STOPPED,
+                                              open_positions=len(self.open_trades))
+        logger.info("Scalper STOPPED (%d positions persisted)", len(self.open_trades))
         return True
 
     def enable(self):
@@ -187,8 +215,13 @@ class HFTScalper:
         self.enabled = False
         logger.info("Scalper DISABLED")
         if self.running:
-            # Schedule async stop + liquidation
-            asyncio.create_task(self._disable_and_liquidate())
+            # Schedule async stop + liquidation (safe from any context)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._disable_and_liquidate())
+            except RuntimeError:
+                # No running loop — can't schedule async work
+                logger.error("Cannot schedule liquidation: no running event loop")
 
     async def _disable_and_liquidate(self):
         """Stop loop and liquidate all positions."""
@@ -199,14 +232,24 @@ class HFTScalper:
 
     async def _scalper_loop(self):
         """Core scalper tick loop."""
-        logger.info("Scalper loop started")
+        from core.registry import is_sim_mode
+        _sim = is_sim_mode()
+        logger.info("Scalper loop started (sim=%s)", _sim)
         momentum = get_momentum_engine()
+        _persist_counter = 0
 
         try:
             while self.running:
                 try:
                     # Check cooldowns
                     momentum.check_cooldowns()
+
+                    # Check FSM timeouts (IGNITING/GATED stuck)
+                    self._check_fsm_timeouts(momentum)
+
+                    # Check pending exit orders — only needed for real brokers
+                    if not _sim:
+                        await self._check_pending_exits()
 
                     # Feed worklist scores into momentum engine
                     await self._update_momentum_scores(momentum)
@@ -217,6 +260,12 @@ class HFTScalper:
                     # Evaluate GATED symbols for entry
                     await self._evaluate_entries()
 
+                    # Persist positions every 30 ticks (~15s)
+                    _persist_counter += 1
+                    if _persist_counter >= 30:
+                        await self._persist_positions()
+                        _persist_counter = 0
+
                     # Tick interval
                     await asyncio.sleep(0.5)
 
@@ -226,6 +275,7 @@ class HFTScalper:
                     logger.exception("Scalper loop error")
                     await asyncio.sleep(1.0)
         finally:
+            await self._persist_positions()
             logger.info("Scalper loop exited")
 
     # --- Momentum Score Feeding ---
@@ -233,8 +283,9 @@ class HFTScalper:
     async def _update_momentum_scores(self, momentum):
         """Feed live scores into momentum engine to drive FSM transitions.
 
-        Refreshes quotes and computes real-time scores from current market data,
-        rather than relying on potentially stale worklist scores.
+        Refreshes quotes and computes real-time scores from current market data.
+        With starter tier Polygon (100 calls/min), we can afford direct calls
+        with 3s cache TTL. Falls back to cached quotes if rate-limited.
         Fetches Finnhub news scores for each symbol (cached 5min).
         """
         from worklist.scoring import ScoringInput, score as compute_score
@@ -244,7 +295,11 @@ class HFTScalper:
         md = get_market_data()
         finnhub = get_finnhub_news()
 
-        for entry in store.to_list():
+        entries = store.to_list()
+        if not entries:
+            return
+
+        for entry in entries:
             symbol = entry["symbol"]
 
             # Skip symbols already in position or exiting
@@ -253,22 +308,11 @@ class HFTScalper:
                             MomentumState.EXITING, MomentumState.COOLDOWN):
                 continue
 
-            # Refresh quote for live data
+            # Fetch quote — uses cache (3s TTL), only hits API when stale
             try:
                 quote = await md.get_quote(symbol)
             except Exception:
-                continue
-
-            if not quote or quote.price <= 0:
-                continue
-
-            # Build real-time scoring input from current quote
-            gap_pct = max(quote.change_pct, 0)
-            volume = quote.volume
-
-            # Estimate RVOL from volume trajectory (sim stocks accumulate volume over time)
-            # Use a reasonable estimate: high-gap stocks typically have 5-15x RVOL
-            rvol = max(1.0, gap_pct / 10) if gap_pct > 0 else 1.0
+                quote = md.get_cached_quote(symbol)
 
             # Fetch news score from Finnhub (cached, non-blocking on failure)
             try:
@@ -276,23 +320,33 @@ class HFTScalper:
             except Exception:
                 news_score = 0.0
 
-            scoring_input = ScoringInput(
-                symbol=symbol,
-                gap_pct=gap_pct,
-                volume=volume,
-                rvol=rvol,
-                news_score=news_score,
-                scanner_score=50.0,
-                last_data_time=time.time(),  # Fresh data = no time decay
-            )
+            if quote and quote.price > 0:
+                # Live market data available — build real-time score
+                gap_pct = max(quote.change_pct, 0)
+                volume = quote.volume
+                rvol = max(1.0, gap_pct / 10) if gap_pct > 0 else 1.0
 
-            live_score = compute_score(scoring_input)
+                scoring_input = ScoringInput(
+                    symbol=symbol,
+                    gap_pct=gap_pct,
+                    volume=volume,
+                    rvol=rvol,
+                    news_score=news_score,
+                    scanner_score=50.0,
+                    last_data_time=time.time(),
+                )
+                live_score = compute_score(scoring_input)
+            else:
+                # No market data (after hours) — use worklist score + news boost
+                base_score = entry.get("score", 0)
+                # Add news contribution: 15% weight × news_norm
+                news_boost = 0.15 * min(news_score, 100)
+                live_score = max(base_score, base_score + news_boost)
 
             # Also update the worklist entry score
             wl_entry = store.get(symbol)
             if wl_entry:
                 wl_entry.score = live_score
-                wl_entry.scoring_input = scoring_input
                 wl_entry.last_scored_at = time.time()
 
             # Feed into momentum engine (drives IDLE->CANDIDATE->IGNITING->GATED)
@@ -314,8 +368,18 @@ class HFTScalper:
         momentum = get_momentum_engine()
 
         for symbol, trade in list(self.open_trades.items()):
+            # Skip symbols with pending exit orders (waiting for fill confirmation)
+            if symbol in self._pending_exits:
+                continue
+
             quote = md.get_cached_quote(symbol)
             if not quote or quote.price <= 0:
+                # Mar 12 fix: stale/missing quote — if past max hold, emergency exit
+                max_hold = self.config.get("max_hold_seconds", 300)
+                if trade.hold_seconds >= max_hold * 2:
+                    logger.warning("STALE QUOTE emergency exit: %s held %ds with no quote data",
+                                   symbol, int(trade.hold_seconds))
+                    await self._exit_position(symbol, f"STALE QUOTE EXIT (held {trade.hold_seconds:.0f}s, no quote)")
                 continue
 
             current_price = quote.price
@@ -361,6 +425,10 @@ class HFTScalper:
                 if pnl_pct <= 0:
                     await self._exit_position(symbol, f"MAX HOLD ({trade.hold_seconds:.0f}s, pnl={pnl_pct:.1f}%)")
                     continue
+                # Mar 12 fix: absolute cap for winners — 3x max_hold, no exceptions
+                if trade.hold_seconds >= max_hold * 3:
+                    await self._exit_position(symbol, f"ABSOLUTE MAX HOLD ({trade.hold_seconds:.0f}s, pnl={pnl_pct:+.1f}%)")
+                    continue
                 # Winners can run past max hold, but start trailing tighter
                 drop_from_high = ((trade.high_since_entry - current_price) / trade.high_since_entry) * 100 if trade.high_since_entry > 0 else 0
                 if drop_from_high >= trail_pct * 0.5:
@@ -368,10 +436,10 @@ class HFTScalper:
                     continue
 
     def _adaptive_stop_pct(self, quote: Quote) -> float:
-        """Adaptive hard stop: base + spread adjustment, clamped 1-3%."""
-        base = self.config.get("stop_loss_percent", 1.5)
+        """Adaptive hard stop: base + spread adjustment, clamped 1.5-5%."""
+        base = self.config.get("stop_loss_percent", 2.5)
         spread_adj = quote.spread_pct * 0.5  # Add half the spread
-        return max(1.0, min(3.0, base + spread_adj))
+        return max(1.5, min(5.0, base + spread_adj))
 
     # --- Entry Evaluation ---
 
@@ -389,11 +457,27 @@ class HFTScalper:
 
         for sm in gated_symbols:
             symbol = sm.symbol
-            if symbol in self.open_trades:
+            if symbol in self.open_trades or symbol in self._pending_exits:
+                continue
+
+            # Per-symbol loss cooldown: skip if recently lost on this symbol
+            cooldown_until = self._symbol_loss_cooldown.get(symbol, 0)
+            if time.time() < cooldown_until:
+                remaining = int(cooldown_until - time.time())
+                logger.debug("Skipping %s: loss cooldown (%ds remaining)", symbol, remaining)
                 continue
 
             quote = md.get_cached_quote(symbol)
             if not quote or quote.ask <= 0:
+                continue
+
+            # Price range filter
+            min_price = self.config.get("min_price", 2.0)
+            max_price = self.config.get("max_price", 20.0)
+            if quote.ask < min_price or quote.ask > max_price:
+                logger.debug("Skipping %s: price %.2f outside range [%.2f, %.2f]",
+                             symbol, quote.ask, min_price, max_price)
+                momentum.transition(symbol, MomentumState.IDLE, f"price {quote.ask:.2f} out of range")
                 continue
 
             # Calculate position size
@@ -415,13 +499,14 @@ class HFTScalper:
                 momentum.transition(symbol, MomentumState.IDLE, f"gate blocked: {gate_result.reason}")
                 continue
 
-            # Place limit order at ask
+            # Place limit order at ask (rounded to penny)
+            limit_price = round(quote.ask, 2)
             result = await broker.place_order(
                 symbol=symbol,
                 side=OrderSide.BUY,
                 qty=qty,
                 order_type=OrderType.LIMIT,
-                limit_price=quote.ask,
+                limit_price=limit_price,
             )
 
             if result.success:
@@ -436,6 +521,11 @@ class HFTScalper:
                 )
                 momentum.mark_position_entered(symbol, quote.ask, qty)
                 gating.record_trade()
+                # Emit entry event for trade ledger
+                get_event_system().emit_trade_event(
+                    EventType.POSITION_OPENED, symbol=symbol, trade_id=result.order_id,
+                    entry_price=quote.ask, qty=qty, limit_price=limit_price,
+                )
                 logger.info("ENTRY: %s %d shares @ %.2f (order=%s)", symbol, qty, quote.ask, result.order_id)
             else:
                 logger.warning("Entry order FAILED for %s: %s", symbol, result.message)
@@ -444,10 +534,16 @@ class HFTScalper:
     # --- Exit ---
 
     async def _exit_position(self, symbol: str, reason: str):
-        """Exit a position with a limit order at bid."""
+        """Exit a position. Sim mode: instant fill + finalize. Real broker: pending exit tracking."""
         trade = self.open_trades.get(symbol)
         if not trade:
             return
+
+        # Guard against duplicate exit calls in same tick
+        if symbol in self._pending_exits:
+            return
+
+        from core.registry import is_sim_mode
 
         momentum = get_momentum_engine()
         momentum.mark_exiting(symbol, reason)
@@ -455,52 +551,201 @@ class HFTScalper:
         md = get_market_data()
         quote = md.get_cached_quote(symbol)
         sell_price = quote.bid if quote and quote.bid > 0 else trade.entry_price * 0.98
+        sell_price = round(sell_price, 2)
 
         broker = get_broker()
-        result = await broker.place_order(
-            symbol=symbol,
-            side=OrderSide.SELL,
-            qty=trade.qty,
-            order_type=OrderType.LIMIT,
-            limit_price=sell_price,
-        )
+
+        if is_sim_mode():
+            # Mark as exiting to prevent duplicate calls
+            self._pending_exits[symbol] = "sim_exit"
+            # SIM MODE: Place order (fills instantly in MockBroker) and finalize
+            result = await broker.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                qty=trade.qty,
+                order_type=OrderType.LIMIT,
+                limit_price=sell_price,
+            )
+            if result.success:
+                # MockBroker fills instantly — get actual fill price
+                order_status = await broker.get_order_status(result.order_id)
+                fill_price = order_status.price if order_status and order_status.price > 0 else sell_price
+                self._finalize_exit(symbol, fill_price, reason)
+            else:
+                # MockBroker may not have the position (restored from disk) — just finalize
+                self._finalize_exit(symbol, sell_price, reason)
+            return
+
+        # REAL BROKER MODE: Throttle retries, track pending exits
+        now = time.time()
+        last_attempt = getattr(trade, '_last_exit_attempt', 0)
+        if now - last_attempt < 5:
+            return
+        trade._last_exit_attempt = now
+
+        # Cancel any open buy order to avoid wash trade rejection
+        if trade.order_id and trade.order_id != "reconciled":
+            try:
+                await broker.cancel_order(trade.order_id)
+            except Exception:
+                pass
+
+        # Use MARKET order after 2 failed limit attempts
+        exit_failures = getattr(trade, '_exit_failures', 0)
+        if exit_failures >= 2:
+            logger.warning("Switching to MARKET order for %s after %d limit failures", symbol, exit_failures)
+            result = await broker.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                qty=trade.qty,
+                order_type=OrderType.MARKET,
+            )
+        else:
+            result = await broker.place_order(
+                symbol=symbol,
+                side=OrderSide.SELL,
+                qty=trade.qty,
+                order_type=OrderType.LIMIT,
+                limit_price=sell_price,
+            )
 
         if result.success:
             trade.exit_order_id = result.order_id
-            pnl = trade.pnl(sell_price)
-            pnl_pct = trade.pnl_pct(sell_price)
-            logger.info("EXIT: %s %d shares @ %.2f | PnL: $%.2f | Reason: %s",
-                        symbol, trade.qty, sell_price, pnl, reason)
-
-            # Record completed trade
-            self._completed_trades.append({
-                "symbol": symbol,
-                "entry_price": trade.entry_price,
-                "exit_price": sell_price,
-                "qty": trade.qty,
-                "pnl": round(pnl, 2),
-                "pnl_pct": round(pnl_pct, 2),
-                "hold_seconds": round(trade.hold_seconds, 1),
-                "exit_reason": reason,
-                "timestamp": datetime.now(ET).isoformat(),
-            })
+            logger.info("EXIT ORDER PLACED: %s %d shares @ %.2f | Reason: %s (order=%s)",
+                        symbol, trade.qty, sell_price, reason, result.order_id)
+            self._pending_exits[symbol] = result.order_id
+            trade._exit_reason = reason
+            trade._exit_sell_price = sell_price
         else:
-            logger.warning("Exit order FAILED for %s: %s — will retry", symbol, result.message)
+            trade._exit_failures = getattr(trade, '_exit_failures', 0) + 1
+            logger.warning("Exit order FAILED for %s (attempt %d): %s",
+                           symbol, trade._exit_failures, result.message)
+
+            # Detect unrecoverable errors
+            unrecoverable = ("cannot be sold short", "hard-to-borrow",
+                             "asset is not tradable", "account is restricted")
+            msg_lower = (result.message or "").lower()
+            is_fatal = any(err in msg_lower for err in unrecoverable)
+
+            if is_fatal:
+                logger.error("UNRECOVERABLE exit failure for %s: %s -- blacklisting",
+                             symbol, result.message)
+                get_gating().blacklist.add(symbol)
+                del self.open_trades[symbol]
+                self._pending_exits.pop(symbol, None)
+                return
+
+            if trade._exit_failures >= 3:
+                logger.error("FORCE CLOSING zombie %s after %d failed exits",
+                             symbol, trade._exit_failures)
+                self._finalize_exit(symbol, sell_price,
+                                    f"FORCE CLOSE (exit failed: {result.message})")
+
+    async def _check_pending_exits(self):
+        """Check pending exit orders for fill confirmation.
+
+        Mar 12: Positions stay in open_trades until the sell order is confirmed filled.
+        If the order is not filled within 60s, cancel and retry.
+        """
+        if not self._pending_exits:
             return
+
+        broker = get_broker()
+        for symbol, order_id in list(self._pending_exits.items()):
+            trade = self.open_trades.get(symbol)
+            if not trade:
+                # Position already removed somehow
+                del self._pending_exits[symbol]
+                continue
+
+            try:
+                order_status = await broker.get_order_status(order_id)
+            except Exception:
+                logger.warning("Failed to check exit order status for %s", symbol)
+                continue
+
+            status_str = (order_status.status or "").upper() if order_status else ""
+
+            if status_str == "FILLED":
+                # Order filled — finalize the exit
+                fill_price = order_status.price if order_status.price > 0 else getattr(trade, '_exit_sell_price', trade.entry_price)
+                reason = getattr(trade, '_exit_reason', 'unknown')
+                self._finalize_exit(symbol, fill_price, reason)
+                del self._pending_exits[symbol]
+                logger.info("EXIT CONFIRMED: %s filled @ %.2f", symbol, fill_price)
+
+            elif status_str in ("CANCELLED", "CANCELED", "EXPIRED", "REJECTED"):
+                # Order was cancelled/rejected — retry exit
+                del self._pending_exits[symbol]
+                trade._last_exit_attempt = 0  # Allow immediate retry
+                logger.warning("Exit order %s for %s, will retry", status_str, symbol)
+
+            else:
+                # Still pending — check if stale (>30s)
+                exit_placed_at = getattr(trade, '_last_exit_attempt', time.time())
+                if time.time() - exit_placed_at > 30:
+                    # Cancel stale exit order and retry
+                    try:
+                        await broker.cancel_order(order_id)
+                    except Exception:
+                        pass
+                    del self._pending_exits[symbol]
+                    trade._last_exit_attempt = 0
+                    logger.warning("Stale exit order for %s cancelled after 30s, will retry", symbol)
+
+    def _finalize_exit(self, symbol: str, exit_price: float, reason: str):
+        """Remove position from tracking, record trade, emit events."""
+        trade = self.open_trades.get(symbol)
+        if not trade:
+            return
+
+        pnl = trade.pnl(exit_price)
+        pnl_pct = trade.pnl_pct(exit_price)
+
+        trade_record = {
+            "symbol": symbol,
+            "entry_price": trade.entry_price,
+            "exit_price": exit_price,
+            "qty": trade.qty,
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "hold_seconds": round(trade.hold_seconds, 1),
+            "exit_reason": reason,
+            "timestamp": datetime.now(ET).isoformat(),
+        }
+        self._completed_trades.append(trade_record)
+
+        # Emit event for trade ledger
+        es = get_event_system()
+        es.emit_trade_event(EventType.POSITION_CLOSED, symbol=symbol,
+                            trade_id=trade.order_id, **trade_record)
+
+        logger.info("EXIT FINAL: %s %d shares @ %.2f | PnL: $%.2f (%+.1f%%) | %s",
+                     symbol, trade.qty, exit_price, pnl, pnl_pct, reason)
+
+        # Per-symbol loss cooldown
+        if pnl < 0:
+            cooldown_secs = self.config.get("symbol_loss_cooldown_seconds", 600)
+            self._symbol_loss_cooldown[symbol] = time.time() + cooldown_secs
+            logger.info("Loss cooldown: %s blocked for %ds", symbol, cooldown_secs)
 
         # Clean up
         del self.open_trades[symbol]
-        momentum.mark_exited(symbol)
+        self._pending_exits.pop(symbol, None)
+        get_momentum_engine().mark_exited(symbol)
 
     # --- Emergency Liquidation ---
 
     async def emergency_liquidate(self, reason: str = "emergency"):
         """Idempotent emergency liquidation of all positions."""
-        with self._liquidation_lock:
+        async with self._liquidation_lock:  # Mar 12: async lock, won't block event loop
             if not self.open_trades:
                 logger.info("Emergency liquidate: no positions to close")
                 return
 
+            es = get_event_system()
+            es.emit_system_event(EventType.EXIT_EMERGENCY, reason=reason,
+                                 position_count=len(self.open_trades))
             logger.warning("EMERGENCY LIQUIDATION: %s (%d positions)", reason, len(self.open_trades))
             for symbol in list(self.open_trades.keys()):
                 await self._exit_position(symbol, f"EMERGENCY: {reason}")
@@ -541,6 +786,126 @@ class HFTScalper:
         while self._heartbeat_alive:
             logger.debug("Scalper heartbeat - positions: %d", len(self.open_trades))
             time.sleep(10)
+
+    # --- Position Persistence (Mar 12: survive restarts) ---
+
+    async def _persist_positions(self):
+        """Save open positions to disk for crash recovery."""
+        if not self.open_trades:
+            await get_position_store().clear()
+            return
+        positions = []
+        for t in self.open_trades.values():
+            positions.append({
+                "symbol": t.symbol,
+                "side": t.side,
+                "qty": t.qty,
+                "entry_price": t.entry_price,
+                "entry_time": t.entry_time,
+                "order_id": t.order_id,
+                "high_since_entry": t.high_since_entry,
+                "exit_order_id": t.exit_order_id,
+            })
+        await get_position_store().save(positions)
+        logger.debug("Persisted %d positions to disk", len(positions))
+
+    async def _restore_positions(self):
+        """Restore positions from disk on startup."""
+        saved = await get_position_store().load()
+        if not saved:
+            return
+        momentum = get_momentum_engine()
+        for p in saved:
+            symbol = p["symbol"]
+            trade = OpenTrade(
+                symbol=symbol,
+                side=p["side"],
+                qty=p["qty"],
+                entry_price=p["entry_price"],
+                entry_time=p["entry_time"],
+                order_id=p["order_id"],
+                high_since_entry=p.get("high_since_entry", p["entry_price"]),
+                exit_order_id=p.get("exit_order_id", ""),
+            )
+            self.open_trades[symbol] = trade
+            # Restore FSM state
+            sm = momentum.get_symbol(symbol)
+            sm.state = MomentumState.IN_POSITION
+            sm.entry_price = trade.entry_price
+            sm.position_qty = trade.qty
+            sm.entered_state_at = trade.entry_time
+            logger.info("RESTORED position: %s %d shares @ %.2f (held %.0fs)",
+                        symbol, trade.qty, trade.entry_price, trade.hold_seconds)
+        logger.info("Restored %d positions from disk", len(saved))
+
+    # --- FSM Timeout Check (Mar 12: prevent stuck states) ---
+
+    def _check_fsm_timeouts(self, momentum):
+        """Expire FSM states that have been stuck too long."""
+        for sm in list(momentum.get_all_active()):
+            # IGNITING stuck > 120s with no score progress -> back to IDLE
+            if sm.state == MomentumState.IGNITING and sm.time_in_state > 120:
+                momentum.transition(sm.symbol, MomentumState.IDLE,
+                                    f"IGNITING timeout ({sm.time_in_state:.0f}s, score={sm.score:.1f})")
+            # GATED stuck > 60s with no fill -> back to IDLE
+            elif sm.state == MomentumState.GATED and sm.time_in_state > 60:
+                momentum.transition(sm.symbol, MomentumState.IDLE,
+                                    f"GATED timeout ({sm.time_in_state:.0f}s, no fill)")
+
+    # --- Broker Reconciliation (Mar 13: sync on startup) ---
+
+    async def _reconcile_broker_positions(self):
+        """Reconcile persisted positions with what broker actually holds.
+
+        On startup, cancel any stale open orders and check if broker has
+        positions we don't know about (or vice versa).
+        """
+        try:
+            broker = get_broker()
+
+            # Cancel all open orders from previous session
+            open_orders = await broker.get_open_orders()
+            for order in open_orders:
+                try:
+                    await broker.cancel_order(order.order_id)
+                    logger.info("Cancelled stale order: %s %s %s",
+                                order.side, order.symbol, order.order_id)
+                except Exception:
+                    pass
+
+            # Check broker positions vs our tracked positions
+            broker_positions = await broker.get_positions()
+            broker_symbols = {p.symbol for p in broker_positions}
+            our_symbols = set(self.open_trades.keys())
+
+            # Positions in broker but not in our tracking — add them
+            for bp in broker_positions:
+                if bp.symbol not in our_symbols and bp.qty > 0:
+                    logger.warning("RECONCILE: Found broker position %s (%s shares @ %.2f) not in our tracking — adding",
+                                   bp.symbol, bp.qty, bp.avg_cost)
+                    self.open_trades[bp.symbol] = OpenTrade(
+                        symbol=bp.symbol,
+                        side="BUY",
+                        qty=int(bp.qty),
+                        entry_price=bp.avg_cost,
+                        entry_time=time.time() - 60,  # Approximate — mark as 1min old
+                        order_id="reconciled",
+                        high_since_entry=bp.avg_cost,
+                    )
+
+            # Positions in our tracking but not in broker — remove them
+            for symbol in our_symbols - broker_symbols:
+                logger.warning("RECONCILE: Tracked position %s not found in broker — removing ghost",
+                               symbol)
+                del self.open_trades[symbol]
+                self._pending_exits.pop(symbol, None)
+
+            if broker_positions or (our_symbols - broker_symbols):
+                logger.info("RECONCILE: broker=%d positions, tracked=%d, synced",
+                            len(broker_positions), len(self.open_trades))
+
+        except Exception:
+            logger.exception("Broker reconciliation failed — continuing with persisted positions")
 
     # --- Status ---
 

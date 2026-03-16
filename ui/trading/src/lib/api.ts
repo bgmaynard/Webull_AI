@@ -120,10 +120,11 @@ export interface QuoteData {
   price: number;
   bid: number;
   ask: number;
-  spread: number;
-  spread_pct: number;
-  volume: number;
+  spread: number | null;
+  spread_pct: number | null;
+  volume: number | null;
   change_pct: number;
+  prev_close: number;
 }
 
 export interface EODReport {

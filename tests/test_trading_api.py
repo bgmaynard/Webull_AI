@@ -46,7 +46,8 @@ def test_scalper_status_placeholder(client):
     resp = client.get("/api/scalper/status")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["enabled"] is False
+    # Scalper auto-enables on startup
+    assert data["enabled"] is True
 
 
 def test_trading_phase_logic():

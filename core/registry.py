@@ -57,6 +57,12 @@ def get_market_data() -> MarketDataInterface:
             _market_data_instance = WebullMarketData()
             logger.info("Market data: Webull")
 
+        elif provider == "replay":
+            from sim.replay_market_data import ReplayMarketData
+            replay_date = os.getenv("REPLAY_DATE", "")
+            _market_data_instance = ReplayMarketData(date=replay_date)
+            logger.info("Market data: Replay (date=%s)", replay_date or "none")
+
         elif provider == "sim":
             from sim.mock_market_data import MockMarketData
             _market_data_instance = MockMarketData()
@@ -74,7 +80,11 @@ def get_provider_name() -> str:
 
 
 def is_sim_mode() -> bool:
-    return get_provider_name() == "sim"
+    return get_provider_name() in ("sim", "replay")
+
+
+def is_replay_mode() -> bool:
+    return os.getenv("MARKET_DATA_PROVIDER", "sim").lower() == "replay"
 
 
 def wire_sim_market_data(broker, market_data):

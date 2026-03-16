@@ -87,7 +87,7 @@ class AlpacaBroker(BrokerInterface):
                     symbol=symbol,
                     qty=qty,
                     side=alp_side,
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=TimeInForce.DAY,
                     limit_price=limit_price,
                 )
             elif order_type == OrderType.MARKET:
@@ -95,14 +95,14 @@ class AlpacaBroker(BrokerInterface):
                     symbol=symbol,
                     qty=qty,
                     side=alp_side,
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=TimeInForce.DAY,
                 )
             elif order_type == OrderType.STOP:
                 request = StopOrderRequest(
                     symbol=symbol,
                     qty=qty,
                     side=alp_side,
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=TimeInForce.DAY,
                     stop_price=stop_price,
                 )
             elif order_type == OrderType.STOP_LIMIT:
@@ -110,7 +110,7 @@ class AlpacaBroker(BrokerInterface):
                     symbol=symbol,
                     qty=qty,
                     side=alp_side,
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=TimeInForce.DAY,
                     limit_price=limit_price,
                     stop_price=stop_price,
                 )

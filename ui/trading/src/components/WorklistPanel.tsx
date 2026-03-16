@@ -51,7 +51,11 @@ function parseSymbols(raw: string): string[] {
     .filter(Boolean);
 }
 
-export function WorklistPanel() {
+interface WorklistPanelProps {
+  onSelectSymbol?: (symbol: string) => void;
+}
+
+export function WorklistPanel({ onSelectSymbol }: WorklistPanelProps) {
   const { data, refetch } = usePolling(api.worklistEnriched, 2000);
   const [input, setInput] = useState('');
   const [addingStatus, setAddingStatus] = useState<string | null>(null);
@@ -169,7 +173,13 @@ export function WorklistPanel() {
           <tbody>
             {symbols.map((s) => (
               <tr key={s.symbol}>
-                <td className="symbol">{s.symbol}</td>
+                <td
+                  className="symbol clickable"
+                  onClick={() => onSelectSymbol?.(s.symbol)}
+                  style={{ cursor: 'pointer' }}
+                >
+                  {s.symbol}
+                </td>
                 <td>${s.price?.toFixed(2) ?? '--'}</td>
                 <td style={{ color: changeColor(s.change_pct) }}>
                   {s.change_pct != null

@@ -12,6 +12,19 @@ from core.models import Quote
 from core.registry import get_market_data
 from worklist.scoring import ScoringInput, score
 from worklist.scrutiny import ScrutinyConfig, SymbolData, evaluate, get_scrutiny_config
+
+# Relaxed config for premarket when volume data isn't yet available
+_PREMARKET_SCRUTINY = ScrutinyConfig(
+    min_price=2.00,
+    max_price=20.00,
+    min_volume=0,            # Volume not reported in premarket
+    min_rvol=0.0,            # RVOL not meaningful without volume
+    max_spread_pct=5.0,      # Wider spreads in premarket
+    min_scanner_score=0.0,   # Scanner score unreliable without volume
+    min_dollar_volume=0,     # Dollar volume not available
+    max_float_millions=20.0,
+    min_gap_pct=5.0,         # Lower gap threshold — direction endpoint pre-filters
+)
 from worklist.store import get_worklist_store
 
 logger = logging.getLogger(__name__)
@@ -89,6 +102,10 @@ class WorklistPipeline:
         store = get_worklist_store()
         scrutiny_cfg = get_scrutiny_config()
 
+        # Use relaxed scrutiny if volume data is unavailable (premarket)
+        has_volume = any(int(item.get("volume", 0) or 0) > 0 for item in gainers)
+        active_cfg = scrutiny_cfg if has_volume else _PREMARKET_SCRUTINY
+
         for item in gainers:
             symbol = item.get("ticker", {}).get("symbol", item.get("symbol", ""))
             if not symbol:
@@ -100,7 +117,7 @@ class WorklistPipeline:
             sym_data = self._build_symbol_data(item)
 
             # Scrutiny filter
-            result = evaluate(sym_data, scrutiny_cfg)
+            result = evaluate(sym_data, active_cfg)
             if not result.passed:
                 self._stats["symbols_rejected"] += 1
                 logger.debug("Scrutiny rejected %s: %s", symbol, result.reason)

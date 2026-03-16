@@ -58,6 +58,7 @@ class CentralGating:
         self.blacklist: set[str] = set()
         self.session_trade_count: int = 0
         self.session_trade_cap: int = 50
+        self._session_date: str = ""  # tracks current trading day for auto-reset
         self.max_position_count: int = 3
         self.max_risk_dollars: float = 10.0
         self.max_spread_pct: float = 1.0
@@ -88,6 +89,13 @@ class CentralGating:
         risk_dollars: float,
     ) -> GateResult:
         """Run all gate checks. Returns GateResult."""
+        # Auto-reset session counters on new trading day
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        if self._session_date and today != self._session_date:
+            logger.info("New trading day detected (%s -> %s), resetting session", self._session_date, today)
+            self.reset_session()
+        self._session_date = today
+
         passed = []
         failed = []
 
@@ -175,9 +183,11 @@ class CentralGating:
 
         if cb.hard_stop_count >= self._hard_stop_limit:
             cb.blocked_until = time.time() + self._circuit_breaker_cooldown
+            # Mar 12 fix: reset count after triggering so it doesn't permanently block
+            cb.hard_stop_count = 0
             logger.warning(
-                "Circuit breaker TRIGGERED for %s (%d hard stops, blocked for %d min)",
-                symbol, cb.hard_stop_count, int(self._circuit_breaker_cooldown / 60)
+                "Circuit breaker TRIGGERED for %s (reset count, blocked for %d min)",
+                symbol, int(self._circuit_breaker_cooldown / 60)
             )
 
     def add_blacklist(self, symbol: str):

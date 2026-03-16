@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { StatusBar } from './components/StatusBar';
 import { PositionsPanel } from './components/PositionsPanel';
 import { ScalperControls } from './components/ScalperControls';
@@ -10,6 +11,8 @@ import { EODReport } from './components/EODReport';
 import './App.css';
 
 function App() {
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+
   return (
     <div className="app">
       <header>
@@ -25,10 +28,10 @@ function App() {
         </div>
         <div className="col">
           <WatchlistPanel />
-          <WorklistPanel />
+          <WorklistPanel onSelectSymbol={setSelectedSymbol} />
         </div>
         <div className="col">
-          <QuotePanel />
+          <QuotePanel selectedSymbol={selectedSymbol} />
           <EODReport />
         </div>
       </div>
