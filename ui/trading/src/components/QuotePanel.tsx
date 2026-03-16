@@ -32,6 +32,13 @@ export function QuotePanel({ selectedSymbol }: QuotePanelProps) {
     }
   }, [selectedSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-refresh active quote every 3 seconds
+  useEffect(() => {
+    if (!symbol) return;
+    const interval = setInterval(() => fetchQuote(symbol), 3000);
+    return () => clearInterval(interval);
+  }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="panel">
       <h3>Quote Lookup</h3>

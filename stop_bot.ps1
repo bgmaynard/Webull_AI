@@ -7,8 +7,8 @@ $logFile = "$logDir\bot_$date.log"
 
 Write-Output "$(Get-Date -Format 'HH:mm:ss') Shutting down trading bot..." | Tee-Object -FilePath $logFile -Append
 
-# Kill backend (port 9100)
-$procs = Get-NetTCPConnection -LocalPort 9100 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+# Kill backend (port 9300)
+$procs = Get-NetTCPConnection -LocalPort 9300 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
 foreach ($pid in $procs) {
     Write-Output "$(Get-Date -Format 'HH:mm:ss') Stopping backend (PID $pid)" | Tee-Object -FilePath $logFile -Append
     Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue

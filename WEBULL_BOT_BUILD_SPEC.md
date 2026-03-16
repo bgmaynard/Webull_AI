@@ -21,7 +21,7 @@ Build a standalone HFT momentum scalper bot on a separate computer, connecting t
 ## Architecture Overview
 
 ```
-webull_trading_api.py (port 9100) — FastAPI + WebSocket
+webull_trading_api.py (port 9300) — FastAPI + WebSocket
     |
     +-- webull_broker.py        (orders, positions, account)
     +-- webull_market_data.py   (quotes, streaming)
@@ -113,7 +113,7 @@ WEBULL_EMAIL=your_email
 WEBULL_PASSWORD=encrypted_or_env
 WEBULL_TRADING_PIN=your_pin
 WEBULL_ACCOUNT_TYPE=paper  # paper or live
-BOT_PORT=9100
+BOT_PORT=9300
 ```
 
 ---
@@ -301,7 +301,7 @@ Single WebSocket endpoint for real-time UI updates:
 - **Circuit breaker per symbol** — 3 hard stops = blocked for 30 min
 
 ### DON'T:
-- **HTTP self-calls** — code inside FastAPI must NOT call `localhost:9100/api/...`, use direct imports
+- **HTTP self-calls** — code inside FastAPI must NOT call `localhost:9300/api/...`, use direct imports
 - **`httpx.AsyncClient`** across event loop restarts — it binds to creating loop, deadlocks after restart. Use `urllib.request` in executor instead
 - **Default thread pool** (`asyncio.to_thread`) for everything — it gets exhausted. Use named executors
 - **Persist `enabled` field** to config file — causes poison restart cycle

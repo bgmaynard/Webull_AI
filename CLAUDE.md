@@ -7,7 +7,7 @@ HFT momentum scalper bot for Webull premarket trading. Python 3.11+ backend (Fas
 ## Architecture
 
 ```
-webull_trading_api.py (port 9100) — FastAPI + WebSocket
+webull_trading_api.py (port 9300) — FastAPI + WebSocket
     |
     +-- webull_broker.py        (orders, positions, account)
     +-- webull_market_data.py   (quotes, batch quotes, premarket gainers)
@@ -59,7 +59,7 @@ cd ui/trading && npm run build   # TypeScript type check + build
 | `WEBULL_PASSWORD` | Webull password |
 | `WEBULL_TRADING_PIN` | Trading PIN |
 | `WEBULL_ACCOUNT_TYPE` | `paper` or `live` |
-| `BOT_PORT` | Server port (default 9100) |
+| `BOT_PORT` | Server port (default 9300) |
 
 ## API Endpoints
 
@@ -122,7 +122,7 @@ Thresholds: candidate=30, igniting=45, gated=60
 - **Update config via API only** (`POST /api/scalper/config`), never edit the JSON file
 
 ### DON'T:
-- **HTTP self-calls**: code inside FastAPI must NOT call `localhost:9100/api/...`, use direct imports
+- **HTTP self-calls**: code inside FastAPI must NOT call `localhost:9300/api/...`, use direct imports
 - **Persist `enabled` field** to config — causes poison restart cycle
 - **Market orders** in premarket — slippage kills edge
 - **`asyncio.get_event_loop()`** — deprecated, use `asyncio.to_thread()` instead

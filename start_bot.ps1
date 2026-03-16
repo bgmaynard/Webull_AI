@@ -2,7 +2,7 @@
 # Scheduled to run at 4:00 AM ET for premarket discovery
 #
 # What happens on launch:
-#   1. Backend starts (webull_trading_api.py on port 9100)
+#   1. Backend starts (webull_trading_api.py on port 9300)
 #   2. Scanner pipeline auto-starts → scans premarket gainers every 60s
 #   3. Scalper auto-enables and starts → monitors momentum + executes trades
 #   4. Frontend dev server starts (port 5173) for dashboard access
@@ -28,9 +28,9 @@ Get-Content "$botDir\.env" | ForEach-Object {
 }
 
 # Kill any existing bot processes on our ports
-$procs = Get-NetTCPConnection -LocalPort 9100 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
+$procs = Get-NetTCPConnection -LocalPort 9300 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique
 foreach ($pid in $procs) {
-    Write-Output "$(Get-Date -Format 'HH:mm:ss') Killing existing process on port 9100 (PID $pid)" | Tee-Object -FilePath $logFile -Append
+    Write-Output "$(Get-Date -Format 'HH:mm:ss') Killing existing process on port 9300 (PID $pid)" | Tee-Object -FilePath $logFile -Append
     Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
 }
 
@@ -58,4 +58,4 @@ $frontend = Start-Process -FilePath "npm" `
     -PassThru -WindowStyle Hidden
 
 Write-Output "$(Get-Date -Format 'HH:mm:ss') Frontend started (PID $($frontend.Id))" | Tee-Object -FilePath $logFile -Append
-Write-Output "$(Get-Date -Format 'HH:mm:ss') Bot ready — Dashboard: http://localhost:5173 | API: http://localhost:9100" | Tee-Object -FilePath $logFile -Append
+Write-Output "$(Get-Date -Format 'HH:mm:ss') Bot ready — Dashboard: http://localhost:5173 | API: http://localhost:9300" | Tee-Object -FilePath $logFile -Append

@@ -1,7 +1,7 @@
 """Trading Bot — Main FastAPI server.
 
 Broker-agnostic. Reads BROKER_PROVIDER and MARKET_DATA_PROVIDER from env.
-Single server handling REST + WebSocket on port 9100.
+Single server handling REST + WebSocket on port 9300.
 """
 
 import asyncio
@@ -845,7 +845,7 @@ def _get_trading_phase(now: datetime) -> str:
 
 # --- Entry Point ---
 if __name__ == "__main__":
-    port = int(os.getenv("BOT_PORT", "9100"))
+    port = int(os.getenv("BOT_PORT", "9300"))
     uvicorn.run(
         "webull_trading_api:app",
         host="0.0.0.0",

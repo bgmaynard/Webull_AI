@@ -241,6 +241,9 @@ class HFTScalper:
         try:
             while self.running:
                 try:
+                    # Daily reset check — resets session at date boundary (4 AM ET rollover)
+                    self._check_daily_reset(momentum)
+
                     # Check cooldowns
                     momentum.check_cooldowns()
 
@@ -839,6 +842,36 @@ class HFTScalper:
         logger.info("Restored %d positions from disk", len(saved))
 
     # --- FSM Timeout Check (Mar 12: prevent stuck states) ---
+
+    def _check_daily_reset(self, momentum):
+        """Reset all session metrics at date boundary. Runs in the scalper loop
+        so it triggers even if the bot runs 24/7 without restart."""
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        if today == self._session_date:
+            return
+        if not self._session_date:
+            # First run — just record the date
+            self._session_date = today
+            return
+
+        logger.info("=== DAILY RESET: %s -> %s ===", self._session_date, today)
+        self._session_date = today
+
+        # Clear in-memory trade history
+        self._completed_trades.clear()
+        self._symbol_loss_cooldown.clear()
+        self._pending_exits.clear()
+
+        # Reset gating counters and circuit breakers
+        get_gating().reset_session()
+
+        # Reset all momentum FSM states (stale from yesterday)
+        active_count = len(momentum.get_all_active())
+        momentum.reset_all()
+        logger.info("Daily reset complete: cleared trades, cooldowns, gating, %d FSM states", active_count)
+
+        # Flush events from previous day
+        get_event_system().emit_system_event(EventType.SESSION_RESET, new_date=today)
 
     def _check_fsm_timeouts(self, momentum):
         """Expire FSM states that have been stuck too long."""
