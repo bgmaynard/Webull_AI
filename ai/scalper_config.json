@@ -14,8 +14,12 @@
   "hard_stop_limit_per_symbol": 3,
   "circuit_breaker_cooldown_minutes": 30,
   "lean_mode": true,
-  "session_trade_cap": 50,
+  "session_trade_cap": 30,
   "max_position_count": 1,
   "max_risk_dollars_per_trade": 3.75,
-  "symbol_loss_cooldown_seconds": 300
+  "symbol_loss_cooldown_seconds": 1800,
+  "min_seconds_between_trades": 30,
+  "market_hours_start": "09:30",
+  "market_hours_end": "16:00",
+  "last_entry_before_close_minutes": 5
 }

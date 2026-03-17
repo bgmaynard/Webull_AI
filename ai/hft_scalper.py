@@ -80,6 +80,7 @@ class HFTScalper:
         self._session_date: str = ""  # tracks current trading day for auto-reset
         self._symbol_loss_cooldown: dict[str, float] = {}  # symbol -> cooldown_until timestamp
         self._pending_exits: dict[str, str] = {}  # symbol -> exit_order_id (Mar 12: fill confirmation)
+        self._last_trade_time: float = 0.0  # global cooldown between trades
         self._loop_task: asyncio.Task | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._heartbeat_alive: bool = False
@@ -138,10 +139,14 @@ class HFTScalper:
             "hard_stop_limit_per_symbol": 3,
             "circuit_breaker_cooldown_minutes": 30,
             "lean_mode": True,
-            "session_trade_cap": 50,
+            "session_trade_cap": 30,
             "max_position_count": 3,
             "max_risk_dollars_per_trade": 10.0,
-            "symbol_loss_cooldown_seconds": 600,
+            "symbol_loss_cooldown_seconds": 1800,
+            "min_seconds_between_trades": 30,
+            "market_hours_start": "09:30",
+            "market_hours_end": "16:00",
+            "last_entry_before_close_minutes": 5,
         }
 
     def update_config(self, updates: dict) -> dict:
@@ -446,8 +451,44 @@ class HFTScalper:
 
     # --- Entry Evaluation ---
 
+    def _is_entry_allowed(self) -> tuple[bool, str]:
+        """Check if new entries are allowed based on market hours and global cooldown."""
+        now_et = datetime.now(ET)
+        hour, minute = now_et.hour, now_et.minute
+        t = hour * 60 + minute
+
+        # Market hours check (configurable)
+        start_str = self.config.get("market_hours_start", "09:30")
+        end_str = self.config.get("market_hours_end", "16:00")
+        sh, sm = map(int, start_str.split(":"))
+        eh, em = map(int, end_str.split(":"))
+        market_open = sh * 60 + sm
+        market_close = eh * 60 + em
+
+        if t < market_open or t >= market_close:
+            return False, f"MARKET_CLOSED ({now_et.strftime('%H:%M')} ET, hours={start_str}-{end_str})"
+
+        # No new entries in last N minutes before close
+        last_entry_min = self.config.get("last_entry_before_close_minutes", 5)
+        cutoff = market_close - last_entry_min
+        if t >= cutoff:
+            return False, f"CLOSE_APPROACHING ({now_et.strftime('%H:%M')} ET, cutoff={last_entry_min}min before close)"
+
+        # Global cooldown between trades
+        min_between = self.config.get("min_seconds_between_trades", 30)
+        since_last = time.time() - self._last_trade_time
+        if self._last_trade_time > 0 and since_last < min_between:
+            return False, f"GLOBAL_COOLDOWN ({since_last:.0f}s < {min_between}s)"
+
+        return True, ""
+
     async def _evaluate_entries(self):
         """Check GATED symbols and attempt entry."""
+        # Market hours + global cooldown check
+        allowed, reason = self._is_entry_allowed()
+        if not allowed:
+            return
+
         momentum = get_momentum_engine()
         gating = get_gating()
         md = get_market_data()
@@ -524,6 +565,7 @@ class HFTScalper:
                 )
                 momentum.mark_position_entered(symbol, quote.ask, qty)
                 gating.record_trade()
+                self._last_trade_time = time.time()
                 # Emit entry event for trade ledger
                 get_event_system().emit_trade_event(
                     EventType.POSITION_OPENED, symbol=symbol, trade_id=result.order_id,
@@ -882,6 +924,7 @@ class HFTScalper:
         self._completed_trades.clear()
         self._symbol_loss_cooldown.clear()
         self._pending_exits.clear()
+        self._last_trade_time = 0.0
 
         # Reset gating counters and circuit breakers
         get_gating().reset_session()
