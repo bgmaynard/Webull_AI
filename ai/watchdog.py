@@ -114,6 +114,10 @@ class Watchdog:
 
             # Force-exit zombies
             if hold_time > zombie_threshold:
+                # Skip if already being exited by the scalper
+                if symbol in scalper._pending_exits:
+                    continue
+
                 self._add_alert("ZOMBIE_DETECTED",
                     f"FORCE EXIT {symbol}: held {hold_time:.0f}s > {zombie_threshold:.0f}s zombie threshold")
                 self._consecutive_stale += 1

@@ -720,7 +720,7 @@ class HFTScalper:
 
         # Emit event for trade ledger
         es = get_event_system()
-        es.emit_trade_event(EventType.POSITION_CLOSED, symbol=symbol,
+        es.emit_trade_event(EventType.POSITION_CLOSED,
                             trade_id=trade.order_id, **trade_record)
 
         logger.info("EXIT FINAL: %s %d shares @ %.2f | PnL: $%.2f (%+.1f%%) | %s",
@@ -813,11 +813,17 @@ class HFTScalper:
         logger.debug("Persisted %d positions to disk", len(positions))
 
     async def _restore_positions(self):
-        """Restore positions from disk on startup."""
+        """Restore positions from disk on startup.
+
+        In sim mode, also sync into MockBroker so sell orders work.
+        """
         saved = await get_position_store().load()
         if not saved:
             return
+
+        from core.registry import is_sim_mode
         momentum = get_momentum_engine()
+
         for p in saved:
             symbol = p["symbol"]
             trade = OpenTrade(
@@ -839,6 +845,21 @@ class HFTScalper:
             sm.entered_state_at = trade.entry_time
             logger.info("RESTORED position: %s %d shares @ %.2f (held %.0fs)",
                         symbol, trade.qty, trade.entry_price, trade.hold_seconds)
+
+        # Sync restored positions into MockBroker so sell orders succeed
+        if is_sim_mode() and saved:
+            broker = get_broker()
+            if hasattr(broker, '_positions'):
+                for p in saved:
+                    symbol = p["symbol"]
+                    from sim.mock_broker import MockPosition
+                    broker._positions[symbol] = MockPosition(
+                        symbol=symbol, qty=p["qty"], avg_cost=p["entry_price"]
+                    )
+                    # Also deduct cash so accounting stays consistent
+                    broker._cash -= p["entry_price"] * p["qty"]
+                logger.info("Synced %d restored positions into MockBroker", len(saved))
+
         logger.info("Restored %d positions from disk", len(saved))
 
     # --- FSM Timeout Check (Mar 12: prevent stuck states) ---
